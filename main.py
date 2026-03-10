@@ -11,7 +11,8 @@ app.include_router(api_router)
 app.include_router(societe_router)
 app.include_router(Leads_router)
 origins = [
-    "http://localhost:3000"
+    "http://localhost:3000",
+    "https://front-lead-clean-1.onrender.com"
 ]
 
 app.add_middleware(
