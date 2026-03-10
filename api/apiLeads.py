@@ -1,0 +1,16 @@
+from fastapi import APIRouter, Depends
+from sqlalchemy.orm import Session
+import service.serviceLeads as SP
+from database.db import get_db
+
+router=APIRouter()
+
+@router.get("/prod")
+async def GetAllProd(db: Session = Depends(get_db)):
+        return SP.GetAllProd(db)
+@router.get("/black")
+async def GetAllBlack(db: Session = Depends(get_db)):
+        return SP.GetAllBlack(db)
+@router.get("/download-leads")
+def download_leads(db: Session = Depends(get_db)):
+        return SP.DowloadProdLead(db)
