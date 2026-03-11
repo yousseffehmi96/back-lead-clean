@@ -12,7 +12,6 @@ app.include_router(societe_router)
 app.include_router(Leads_router)
 origins = [
     "http://localhost:3000",
-    "https://front-lead-clean-1.onrender.com",
     "https://front-lead-clean.vercel.app/"
 ]
 
