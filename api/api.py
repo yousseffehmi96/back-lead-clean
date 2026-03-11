@@ -12,6 +12,6 @@ async def Upload(file: UploadFile = File(...), db: Session = Depends(get_db)):
     stats.update(CompleteEmail(db)) 
     stats.update(CheckContactsBlack(db))
     nettoyer_contact(db) 
-    stats.update(StagingToProd(db))  
+    stats.update(StagingToProd(db))
     return stats
 
