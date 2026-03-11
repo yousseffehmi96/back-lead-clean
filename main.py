@@ -13,7 +13,7 @@ app.include_router(Leads_router)
 origins = [
     "http://localhost:3000",
     "https://front-lead-clean-1.onrender.com",
-    "https://back-lead-cleanss.vercel.app"
+    "https://front-lead-clean.vercel.app/"
 ]
 
 app.add_middleware(
