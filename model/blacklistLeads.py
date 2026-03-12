@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text, TIMESTAMP, text
+from sqlalchemy import Column, Integer, String, Text, TIMESTAMP, text,Enum
 from database.db import Base
 
 class blacklistLeads(Base):
@@ -12,6 +12,7 @@ class blacklistLeads(Base):
     societe = Column(String(150))
     telephone = Column(String(50))
     linkedin = Column(Text)
+    eliminer = Column(Enum("Unsubscribe", "archive", name="eliminer_enum"))
     created_at = Column(
         TIMESTAMP,
         server_default=text("CURRENT_TIMESTAMP")

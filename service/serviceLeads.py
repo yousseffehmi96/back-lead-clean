@@ -42,3 +42,31 @@ def DowloadProdLead(db:Session):
         headers={"Content-Disposition": "attachment; filename=leads.csv"}
     )
 
+def ToBlack(id:int,eliminer:str,db:Session):
+    result =db.query(Prod_leads).filter(Prod_leads.id==id).first()
+    if (not result):
+        raise HTTPException(
+               status_code=404,
+               detail='Leads non trouvè'
+        )
+    print(result.nom)
+    blocklead=blacklistLeads(
+                    id=result.id,
+                    nom=result.nom,
+                    prenom= result.prenom,
+                    email=result.email,
+                    fonction= result.fonction,
+                    societe= result.societe,
+                    telephone=result.telephone,
+                    linkedin= result.linkedin,
+                    eliminer=eliminer
+                )
+    print(blocklead)
+    db.add(blocklead)
+    db.delete(result)
+    db.commit()
+    return {
+            "message": "Le leads a èté blocque avec succeè"
+        }
+    
+

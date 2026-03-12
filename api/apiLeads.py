@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends,Body
 from sqlalchemy.orm import Session
 import service.serviceLeads as SP
 from database.db import get_db
@@ -14,3 +14,6 @@ async def GetAllBlack(db: Session = Depends(get_db)):
 @router.get("/download-leads")
 def download_leads(db: Session = Depends(get_db)):
         return SP.DowloadProdLead(db)
+@router.post("/toblack/{id}")
+def ToBlack(id:int,eliminer:str=Body(...),db: Session = Depends(get_db)):
+        return SP.ToBlack(id,eliminer,db)

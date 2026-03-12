@@ -152,7 +152,7 @@ def CheckContactsBlack(db: Session):
                 blacklisted_removed += 1
 
         db.commit()
-        return {"blacklisted_removed": blacklisted_removed}
+        return {"blacklisted_removed": blacklisted_removed,"liggne rester":len(leads)}
 
     except HTTPException:
         raise
