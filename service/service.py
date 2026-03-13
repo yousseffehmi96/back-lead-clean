@@ -165,6 +165,7 @@ def CheckContactsBlack(db: Session):
 
 
 def nettoyer_contact(db: Session):
+    
     try:
         result = db.query(StagingLeads).all()
 
@@ -196,7 +197,7 @@ def nettoyer_contact(db: Session):
 def StagingToProd(db: Session):
     try:
         result = db.query(StagingLeads).all()
-
+            
         if not result:
             raise HTTPException(status_code=404, detail="Aucun lead en staging à traiter.")
 
@@ -208,19 +209,13 @@ def StagingToProd(db: Session):
         clean_rows = []
 
         for row in result:
-            is_incomplete = (
-                row.email is None or
-                row.telephone is None or
-                row.societe is None or
-                row.linkedin is None
-            )
-
-            if is_incomplete:
-                clean_rows.append(cleaningleads(
-                    nom=row.nom, prenom=row.prenom, email=row.email,
-                    fonction=row.fonction, societe=row.societe,
-                    telephone=row.telephone, linkedin=row.linkedin
-                ))
+            if row.email is None:
+                    print('hhhhhhh')
+                    clean_rows.append(cleaningleads(
+                        nom=row.nom, prenom=row.prenom, email=row.email,
+                        fonction=row.fonction, societe=row.societe,
+                        telephone=row.telephone, linkedin=row.linkedin
+                    ))
             else:
                 if row.email not in existing_emails:
                     prod_rows.append(Prod_leads(
