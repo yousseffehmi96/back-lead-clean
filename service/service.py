@@ -9,9 +9,21 @@ from model.cleaning_leads import cleaningleads
 from model.societe_leads import societeleads
 from model.prod_leads import Prod_leads
 from util.util import NetoyerUneChaine, NetoyerUnNumero, NettoyerUnEmail
-
+from model.statistiqueLeads import StatisticLeads
+from schema.schemaStatic import Static 
 
 def LoadFileToBd(file: UploadFile, db: Session):
+    # Mapping : nom standard → variantes acceptées (insensible à la casse)
+    COLUMN_ALIASES = {
+        "Nom":       ["nom", "last name", "lastname", "last_name", "surname"],
+        "Prenom":    ["prenom", "prénom", "first name", "firstname", "first_name", "name"],
+        "Email":     ["email", "mail", "e-mail", "courriel"],
+        "Fonction":  ["fonction", "title", "titre", "poste", "job title", "action"],
+        "Societe":   ["societe", "société", "company", "company name", "entreprise", "organization"],
+        "Telephone": ["telephone", "téléphone", "tel", "phone", "mobile", "gsm"],
+        "Linkedin":  ["linkedin"],
+    }
+
     try:
         if not file.filename:
             raise HTTPException(status_code=400, detail="Nom de fichier manquant.")
@@ -26,10 +38,18 @@ def LoadFileToBd(file: UploadFile, db: Session):
 
         df.columns = df.columns.str.strip()
 
-        required_columns = {"Nom", "Prenom", "Email", "Fonction", "Societe", "Telephone", "Linkedin"}
-        missing = required_columns - set(df.columns)
-        if missing:
-            raise HTTPException(status_code=400, detail=f"Colonnes manquantes dans le fichier : {', '.join(missing)}")
+        rename_map = {}
+        for standard_name, aliases in COLUMN_ALIASES.items():
+            for col in df.columns:
+                if col.lower() in aliases and standard_name not in df.columns:
+                    rename_map[col] = standard_name
+                    break
+        df.rename(columns=rename_map, inplace=True)
+
+        all_columns = ["Nom", "Prenom", "Email", "Fonction", "Societe", "Telephone", "Linkedin"]
+        for col in all_columns:
+            if col not in df.columns:
+                df[col] = None
 
         if df.empty:
             raise HTTPException(status_code=400, detail="Le fichier est vide.")
@@ -38,13 +58,13 @@ def LoadFileToBd(file: UploadFile, db: Session):
         for i in df.itertuples():
             users.append(
                 StagingLeads(
-                    nom=None if str(i.Nom).lower() == "nan" else i.Nom,
+                    nom=None if str(i.Nom).lower() == "nan"   else i.Nom,
                     prenom=None if str(i.Prenom).lower() == "nan" else i.Prenom,
-                    email=None if str(i.Email).lower() == "nan" else i.Email,
-                    fonction=None if str(i.Fonction).lower() == "nan" else i.Fonction,
-                    societe=None if str(i.Societe).lower() == "nan" else i.Societe,
-                    telephone=None if str(i.Telephone).lower() == "nan" else str(i.Telephone),
-                    linkedin=None if str(i.Linkedin).lower() == "nan" else i.Linkedin
+                    email=None if str(i.Email).lower() == "nan"  else i.Email,
+                    fonction=None if str(i.Fonction).lower() == "nan"  else i.Fonction,
+                    societe=None if str(i.Societe).lower() == "nan"  else i.Societe,
+                    telephone=None if str(i.Telephone).lower() == "nan"  else str(i.Telephone),
+                    linkedin=None if str(i.Linkedin).lower() == "nan"  else i.Linkedin
                 )
             )
 
@@ -209,8 +229,8 @@ def StagingToProd(db: Session):
         clean_rows = []
 
         for row in result:
-            if row.email is None:
-                    print('hhhhhhh')
+            print(row)
+            if row.email is None or row.email=="":
                     clean_rows.append(cleaningleads(
                         nom=row.nom, prenom=row.prenom, email=row.email,
                         fonction=row.fonction, societe=row.societe,
@@ -245,3 +265,26 @@ def StagingToProd(db: Session):
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Erreur inattendue : {str(e)}")
+
+
+def SaveStatic(db: Session,static:Static):
+   try:
+        statics=StatisticLeads(
+            inserted_rows = static.inserted_rows,
+            duplicates_deleted=static.duplicates_deleted,
+            emails_completed=static.emails_completed,
+            blacklisted_removed=static.blacklisted_removed,
+            moved_to_prod =static.moved_to_clean,
+            moved_to_clean =static.moved_to_prod
+        )
+        db.bulk_save_objects(static)
+        db.commit()
+   except HTTPException:
+        raise
+   except SQLAlchemyError as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Erreur base de données : {str(e)}")
+   except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Erreur inattendue : {str(e)}")
+
