@@ -17,3 +17,6 @@ def download_leads(db: Session = Depends(get_db)):
 @router.post("/toblack/{id}")
 def ToBlack(id:int,eliminer:str=Body(...),db: Session = Depends(get_db)):
         return SP.ToBlack(id,eliminer,db)
+@router.get("/clean")
+async def GetAllClean(db:Session=Depends(get_db)):
+        return SP.GetAllClean(db)

@@ -4,13 +4,15 @@ from fastapi import HTTPException
 from model.prod_leads import Prod_leads
 from model.blacklistLeads import blacklistLeads
 from fastapi.responses import StreamingResponse
-
+from model.cleaning_leads import cleaningleads
 import csv
 import io
 def GetAllProd(db:Session):
     return db.query(Prod_leads).all()
 def GetAllBlack(db:Session):
     return db.query(blacklistLeads).all()
+def GetAllClean(db:Session):
+    return db.query(cleaningleads).all()
 def DowloadProdLead(db:Session):
     leads=db.query(Prod_leads).all()
     output=io.StringIO()
