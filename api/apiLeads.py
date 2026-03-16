@@ -20,3 +20,7 @@ def ToBlack(id:int,eliminer:str=Body(...),db: Session = Depends(get_db)):
 @router.get("/clean")
 async def GetAllClean(db:Session=Depends(get_db)):
         return SP.GetAllClean(db)
+
+@router.get("/stat")
+async def GetAllClean(db:Session=Depends(get_db)):
+        return SP.GetAllStat(db)

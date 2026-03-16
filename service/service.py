@@ -33,9 +33,8 @@ def LoadFileToBd(file: UploadFile, db: Session):
 
         try:
             df = pd.read_csv(file.file, encoding="latin1") if ".csv" in file.filename else pd.read_excel(file.file)
-        except Exception:
-            raise HTTPException(status_code=400, detail="Impossible de lire le fichier. Vérifiez qu'il n'est pas corrompu.")
-
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"ERREUR EXACTE: {str(e)}")
         df.columns = df.columns.str.strip()
 
         rename_map = {}
@@ -270,6 +269,7 @@ def StagingToProd(db: Session):
 def SaveStatic(db: Session,static:Static):
    try:
         statics=StatisticLeads(
+            filename=static.filename,
             inserted_rows = static.inserted_rows,
             duplicates_deleted=static.duplicates_deleted,
             emails_completed=static.emails_completed,
@@ -277,7 +277,7 @@ def SaveStatic(db: Session,static:Static):
             moved_to_prod =static.moved_to_clean,
             moved_to_clean =static.moved_to_prod
         )
-        db.bulk_save_objects(static)
+        db.add(statics)
         db.commit()
    except HTTPException:
         raise

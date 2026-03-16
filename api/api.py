@@ -7,11 +7,14 @@ Router=APIRouter()
 @Router.post("/upload")
 async def Upload(file: UploadFile = File(...), db: Session = Depends(get_db)):
     stats = {}  
+    stats["filename"]=file.filename
     stats.update(LoadFileToBd(file, db)) 
     stats.update(SupprimerDoublons(db,"staging_leads"))  
     stats.update(CompleteEmail(db)) 
     stats.update(CheckContactsBlack(db))
     nettoyer_contact(db) 
     stats.update(StagingToProd(db))
+    static = Static(**stats) 
+    SaveStatic(db,static)
     return stats
 

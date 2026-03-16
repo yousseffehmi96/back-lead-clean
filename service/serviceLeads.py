@@ -5,6 +5,7 @@ from model.prod_leads import Prod_leads
 from model.blacklistLeads import blacklistLeads
 from fastapi.responses import StreamingResponse
 from model.cleaning_leads import cleaningleads
+from model.statistiqueLeads import StatisticLeads
 import csv
 import io
 def GetAllProd(db:Session):
@@ -13,6 +14,8 @@ def GetAllBlack(db:Session):
     return db.query(blacklistLeads).all()
 def GetAllClean(db:Session):
     return db.query(cleaningleads).all()
+def GetAllStat(db:Session):
+    return db.query(StatisticLeads).all()
 def DowloadProdLead(db:Session):
     leads=db.query(Prod_leads).all()
     output=io.StringIO()

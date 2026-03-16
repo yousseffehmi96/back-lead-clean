@@ -6,6 +6,7 @@ class StatisticLeads(Base):
     __tablename__ = "statistic_leads"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    filename=Column(String)
     inserted_rows = Column(Integer)
     duplicates_deleted=Column(Integer)
     emails_completed=Column(Integer)
