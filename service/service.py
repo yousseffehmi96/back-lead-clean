@@ -13,7 +13,6 @@ from model.statistiqueLeads import StatisticLeads
 from schema.schemaStatic import Static 
 
 def LoadFileToBd(file: UploadFile, db: Session):
-    # Mapping : nom standard → variantes acceptées (insensible à la casse)
     COLUMN_ALIASES = {
         "Nom":       ["nom", "last name", "lastname", "last_name", "surname"],
         "Prenom":    ["prenom", "prénom", "first name", "firstname", "first_name", "name"],
@@ -32,38 +31,73 @@ def LoadFileToBd(file: UploadFile, db: Session):
             raise HTTPException(status_code=400, detail="Format de fichier non supporté. Utilisez .csv ou .xlsx")
 
         try:
-            df = pd.read_csv(file.file, encoding="latin1") if ".csv" in file.filename else pd.read_excel(file.file)
+            file.file.seek(0)
+            if ".csv" in file.filename:
+                # ✅ détecte automatiquement le séparateur
+                sample = file.file.read(4096).decode("latin1", errors="ignore")
+                file.file.seek(0)
+                import csv
+                try:
+                    dialect = csv.Sniffer().sniff(sample, delimiters=",;|\t")
+                    sep = dialect.delimiter
+                except Exception:
+                    sep = ","
+                df = pd.read_csv(
+                    file.file,
+                    encoding="latin1",
+                    sep=sep,
+                    on_bad_lines="skip",   # ✅ ignore les lignes malformées
+                    engine="python",       # ✅ plus tolérant
+                    quoting=csv.QUOTE_ALL, # ✅ gère les virgules dans les cellules
+                )
+            else:
+                df = pd.read_excel(file.file)
+        except HTTPException:
+            raise
         except Exception as e:
-            raise HTTPException(status_code=400, detail=f"ERREUR EXACTE: {str(e)}")
-        df.columns = df.columns.str.strip()
+            raise HTTPException(status_code=400, detail=f"Impossible de lire le fichier : {str(e)}")
 
+        # ✅ nettoie les noms de colonnes
+        df.columns = df.columns.str.strip().str.replace(r"\s+", " ", regex=True)
+
+        # ✅ renommage insensible à la casse
         rename_map = {}
         for standard_name, aliases in COLUMN_ALIASES.items():
             for col in df.columns:
-                if col.lower() in aliases and standard_name not in df.columns:
+                if col.strip().lower() in aliases and standard_name not in rename_map.values():
                     rename_map[col] = standard_name
                     break
         df.rename(columns=rename_map, inplace=True)
 
+        # ✅ ajoute les colonnes manquantes
         all_columns = ["Nom", "Prenom", "Email", "Fonction", "Societe", "Telephone", "Linkedin"]
         for col in all_columns:
             if col not in df.columns:
                 df[col] = None
 
+        # ✅ supprime les lignes complètement vides
+        df.dropna(how="all", inplace=True)
+
         if df.empty:
             raise HTTPException(status_code=400, detail="Le fichier est vide.")
+
+        def clean(val):
+            if val is None:
+                return None
+            s = str(val).strip()
+            return None if s.lower() in ("nan", "none", "", "n/a", "null") else s
 
         users = []
         for i in df.itertuples():
             users.append(
                 StagingLeads(
-                    nom=None if str(i.Nom).lower() == "nan"   else i.Nom,
-                    prenom=None if str(i.Prenom).lower() == "nan" else i.Prenom,
-                    email=None if str(i.Email).lower() == "nan"  else i.Email,
-                    fonction=None if str(i.Fonction).lower() == "nan"  else i.Fonction,
-                    societe=None if str(i.Societe).lower() == "nan"  else i.Societe,
-                    telephone=None if str(i.Telephone).lower() == "nan"  else str(i.Telephone),
-                    linkedin=None if str(i.Linkedin).lower() == "nan"  else i.Linkedin
+                    nom=clean(i.Nom),
+                    prenom=clean(i.Prenom),
+                    email=clean(i.Email),
+                    fonction=clean(i.Fonction),
+                    societe=clean(i.Societe),
+                    telephone=clean(i.Telephone),
+                    linkedin=clean(i.Linkedin),
                 )
             )
 
@@ -216,7 +250,7 @@ def nettoyer_contact(db: Session):
 def StagingToProd(db: Session):
     try:
         result = db.query(StagingLeads).all()
-            
+
         if not result:
             raise HTTPException(status_code=404, detail="Aucun lead en staging à traiter.")
 
@@ -226,41 +260,61 @@ def StagingToProd(db: Session):
 
         prod_rows = []
         clean_rows = []
+        duplicates = 0  
 
         for row in result:
-            print(row)
-            if row.email is None or row.email=="":
-                    clean_rows.append(cleaningleads(
-                        nom=row.nom, prenom=row.prenom, email=row.email,
-                        fonction=row.fonction, societe=row.societe,
-                        telephone=row.telephone, linkedin=row.linkedin
-                    ))
+            #  CAS 1 : email vide → cleaning
+            if row.email is None or row.email == "":
+                clean_rows.append(cleaningleads(
+                    nom=row.nom,
+                    prenom=row.prenom,
+                    email=row.email,
+                    fonction=row.fonction,
+                    societe=row.societe,
+                    telephone=row.telephone,
+                    linkedin=row.linkedin
+                ))
+
             else:
+                #  CAS 2 : email unique → prod
                 if row.email not in existing_emails:
                     prod_rows.append(Prod_leads(
-                        nom=row.nom, prenom=row.prenom, email=row.email,
-                        fonction=row.fonction, societe=row.societe,
-                        telephone=row.telephone, linkedin=row.linkedin
+                        nom=row.nom,
+                        prenom=row.prenom,
+                        email=row.email,
+                        fonction=row.fonction,
+                        societe=row.societe,
+                        telephone=row.telephone,
+                        linkedin=row.linkedin
                     ))
                     existing_emails.add(row.email)
 
+                #  CAS 3 : email doublon → cleaning + compteur
+                else:
+                    duplicates += 1
+
         db.bulk_save_objects(prod_rows)
         db.bulk_save_objects(clean_rows)
+
         db.query(StagingLeads).delete()
+
         db.commit()
 
         supp = SupprimerDoublons(db, "cleaning_leads")
 
         return {
             "moved_to_prod": len(prod_rows),
-            "moved_to_clean": len(clean_rows) - supp['duplicates_deleted']
+            "moved_to_clean": len(clean_rows) - supp['duplicates_deleted'],
+            "duplicates_skipped": duplicates
         }
 
     except HTTPException:
         raise
+
     except SQLAlchemyError as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Erreur base de données : {str(e)}")
+
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Erreur inattendue : {str(e)}")
