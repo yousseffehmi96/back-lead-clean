@@ -131,9 +131,7 @@ def SupprimerDoublons(db: Session, table: str):
                     COALESCE(prenom, ''),
                     COALESCE(email, ''),
                     COALESCE(fonction, ''),
-                    COALESCE(societe, ''),
-                    COALESCE(telephone, ''),
-                    COALESCE(linkedin, '')
+                    COALESCE(societe, '')
             )
         """)
         res = db.execute(query)
@@ -304,7 +302,7 @@ def StagingToProd(db: Session):
 
         return {
             "moved_to_prod": len(prod_rows),
-            "moved_to_clean": len(clean_rows) - supp['duplicates_deleted'],
+            "moved_to_clean": abs(len(clean_rows) - supp['duplicates_deleted']),
             "duplicates_skipped": duplicates
         }
 
