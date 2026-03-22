@@ -1,20 +1,34 @@
 from fastapi import UploadFile,File,APIRouter,Depends
 from service.service import *
 from database.db import get_db
-
+import service.serviceLeads as sp
 Router=APIRouter()
 
 @Router.post("/upload")
 async def Upload(file: UploadFile = File(...), db: Session = Depends(get_db)):
-    stats = {}  
+  
+    stats = {} 
     stats["filename"]=file.filename
-    stats.update(LoadFileToBd(file, db)) 
-    stats.update(SupprimerDoublons(db,"staging_leads"))  
-    stats.update(CompleteEmail(db)) 
-    stats.update(CheckContactsBlack(db))
-    nettoyer_contact(db) 
-    stats.update(StagingToProd(db))
+    stats.update(LoadFileToBd(file, db))
+    print("stat lena",stats)
+    stats.update(SupprimerDoublons(db,"staging_leads"))
+    print("stat lena2",stats)
+    """nettoyer_contact(db)"""
+    print("stat lena3",stats)
+    stats.setdefault("emails_completed", 0)
+    stats.setdefault("blacklisted_removed", 0)
+    stats.setdefault("moved_to_silver", 0)
+    stats.setdefault("moved_to_gold", 0)
+    stats.setdefault("moved_to_clean", 0)
     static = Static(**stats) 
     SaveStatic(db,static)
     return stats
+        
 
+
+@Router.get("/staging")
+async def StagingLeads(db: Session = Depends(get_db)):
+        """LoadFileToBd(file, db)"""
+        return sp.GetAllStaging(db)
+"""@Router.get("/clean")
+async def clean"""

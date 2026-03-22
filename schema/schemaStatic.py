@@ -7,5 +7,6 @@ class Static(BaseModel):
     duplicates_deleted: int
     emails_completed: int
     blacklisted_removed: int
-    moved_to_prod: int
+    moved_to_silver: int
     moved_to_clean: int
+    moved_to_gold: int

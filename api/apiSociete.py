@@ -20,3 +20,6 @@ async def update(id: int, societe: Societe, db: Session = Depends(get_db)):
 @routes.get("/societe")
 async def GetAll( db: Session = Depends(get_db)):
     return Sso.GetAll(db)
+@routes.get("/addsociete")
+async def AddSociete(db: Session = Depends(get_db)):
+    return Sso.AddAuto(db)

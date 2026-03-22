@@ -2,8 +2,8 @@ from database.db import Base
 from sqlalchemy import Column,Integer,String,Text,TIMESTAMP,text
 
 
-class Prod_leads(Base):
-    __tablename__ = "prod_leads"
+class Gold_leads(Base):
+    __tablename__ = "gold_leads"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
 
