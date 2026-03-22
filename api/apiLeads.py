@@ -10,8 +10,8 @@ router=APIRouter()
 async def GetAllsilver(db: Session = Depends(get_db)):
         return SP.GetAllSilver(db)
 @router.get("/gold")
-async def GetAllsilver(db: Session = Depends(get_db)):
-        return SP.GetAllSilver(db)
+async def GetAllGold(db: Session = Depends(get_db)):
+        return SP.GetAllGold(db)
 @router.get("/black")
 async def GetAllBlack(db: Session = Depends(get_db)):
         return SP.GetAllBlack(db)
