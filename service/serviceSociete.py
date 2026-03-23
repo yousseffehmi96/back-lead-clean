@@ -3,8 +3,8 @@ from model.societe_leads import societeleads
 from fastapi import HTTPException
 from schema.schemaSociete import Societe
 from model.staging_leads import StagingLeads
-from sqlalchemy import func
-
+from sqlalchemy import func,text
+from sqlalchemy.exc import SQLAlchemyError
 def AddSoc(societe:Societe,db:Session):
     result=db.query(societeleads).filter(societeleads.nom==societe.nom).first()
     if result:
@@ -72,43 +72,57 @@ def GetAll(db:Session):
     return db.query(societeleads).all()
 
 def AddAuto(db: Session):
-    societe = []
-
-    leads = [{"email": i.email, "societe": i.societe} for i in db.query(StagingLeads).filter(
-        StagingLeads.email.isnot(None),
-        StagingLeads.email != "",
-        func.lower(StagingLeads.email) != "nan",
-        StagingLeads.societe.isnot(None),
-        StagingLeads.societe != "",
-        func.lower(StagingLeads.societe) != "nan",
-    ).distinct(StagingLeads.societe).all()]
-
-    existing = {i.nom.lower() for i in db.query(societeleads).all()}
-    seen = set()  
-
-    for lead in leads:
-        nom = lead["societe"].lower()
-
-        if nom in existing or nom in seen:
-            continue
-
-        seen.add(nom)
-        domaine, ext = get_domain(lead["email"])
-
-        if not domaine or not ext:
-            continue
-
-        societe.append(societeleads(
-            nom=nom,
-            domaine=domaine.lower(),
-            extension=ext.lower()
-        ))
-
-    if societe:
-        db.add_all(societe)
+    try:
+        
+        # INSERT avec RETURNING pour obtenir le nombre exact
+        result = db.execute(text("""
+            WITH candidates AS (
+                SELECT 
+                    LOWER(TRIM(sl.societe)) as nom,
+                    LOWER(SPLIT_PART(SPLIT_PART(sl.email, '@', 2), '.', 1)) as domaine,
+                    LOWER(SPLIT_PART(SPLIT_PART(sl.email, '@', 2), '.', 2)) as extension,
+                    ROW_NUMBER() OVER (PARTITION BY LOWER(TRIM(sl.societe)) ORDER BY sl.id) as rn
+                FROM staging_leads sl
+                WHERE sl.email IS NOT NULL 
+                  AND sl.email != ''
+                  AND LOWER(sl.email) != 'nan'
+                  AND sl.societe IS NOT NULL
+                  AND sl.societe != ''
+                  AND LOWER(sl.societe) != 'nan'
+                  AND POSITION('@' IN sl.email) > 0
+                  AND POSITION('.' IN SPLIT_PART(sl.email, '@', 2)) > 0
+            ),
+            new_societes AS (
+                INSERT INTO societe_leads (nom, domaine, extension)
+                SELECT c.nom, c.domaine, c.extension
+                FROM candidates c
+                WHERE c.rn = 1
+                  AND c.domaine IS NOT NULL
+                  AND c.domaine != ''
+                  AND c.extension IS NOT NULL
+                  AND c.extension != ''
+                  AND NOT EXISTS (
+                      SELECT 1 FROM societe_leads s 
+                      WHERE LOWER(s.nom) = c.nom
+                  )
+                RETURNING id
+            )
+            SELECT COUNT(*) FROM new_societes
+        """))
+        
         db.commit()
+        
+        added_count = result.scalar()
+        
+        print(f"✅ {added_count} nouvelles sociétés ajoutées")
+        return {"added_societes": added_count}
 
-    return {"added_societes": len(societe)}
+    except SQLAlchemyError as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Erreur base de données : {str(e)}")
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Erreur inattendue : {str(e)}")
 
 def get_domain(email: str):
     if not email or email.lower() in ("nan", "none", "null", ""):

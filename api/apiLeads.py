@@ -33,11 +33,8 @@ async def GetAllClean(db:Session=Depends(get_db)):
 async def StagingDispatch(filename: str = Body(...), db: Session = Depends(get_db)):
     try:
         result = {}
-        
-
-       
-
-        r3=Ss.AddAuto(db)
+        r1=Ss.AddAuto(db)
+        result.update(r1)
         r2 = CompleteEmail(db)
         result.update(r2)
 

@@ -179,24 +179,26 @@ def SupprimerDoublons(db: Session, table: str):
 def CompleteEmail(db: Session):
     print("🔄 Début de complétion des emails...")
     try:
+        from sqlalchemy import text
         
         # Vérifier qu'il y a des sociétés
         count_societes = db.query(societeleads).count()
         if count_societes == 0:
             raise HTTPException(status_code=404, detail="Aucune société trouvée en base.")
 
-        # UPDATE avec JOIN en SQL pur (ultra-rapide)
+        # UPDATE avec JOIN - UNIQUEMENT si email est NULL ou vide
         result = db.execute(text("""
             UPDATE staging_leads sl
             SET email = CONCAT(sl.prenom, '.', sl.nom, '@', s.domaine, '.', s.extension)
             FROM societe_leads s
             WHERE UPPER(sl.societe) = UPPER(s.nom)
-              AND sl.email IS NOT NULL 
-              AND sl.email != ''
+              AND (sl.email IS NULL OR sl.email = '' OR sl.email = 'nan')
               AND sl.nom IS NOT NULL 
               AND sl.nom != ''
+              AND sl.nom != 'nan'
               AND sl.prenom IS NOT NULL 
               AND sl.prenom != ''
+              AND sl.prenom != 'nan'
               AND s.domaine IS NOT NULL
               AND s.extension IS NOT NULL
         """))
