@@ -18,6 +18,7 @@ from openpyxl.utils import get_column_letter
 import csv
 import io
 from sqlalchemy.exc import SQLAlchemyError
+from service import service as se
 def GetAllSilver(db:Session):
     return db.query(Silver_leads).all()
 def GetAllGold(db:Session):
@@ -302,8 +303,9 @@ def StagingToClean(db: Session):
         db.execute(text("""
             DELETE FROM staging_leads
         """))
-        
+        se.SupprimerDoublons(db,"cleaning_leads")
         db.commit()
+
         
         print(f"✅ {moved_count} leads déplacés vers Cleaning")
         return {"moved_to_clean": moved_count}
@@ -390,8 +392,10 @@ def StagingToGold(db: Session):
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Erreur inattendue : {str(e)}")
+        
 
-
+def completevoid(db:Session):
+    print("hhhhhh")
 def CompleteSocieteFromEmail(db: Session):
     try:        
         # UPDATE avec extraction du domaine en SQL pur
@@ -466,3 +470,6 @@ def CompleteNomPrenomFromEmail(db: Session):
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Erreur inattendue : {str(e)}")
+
+
+
