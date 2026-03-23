@@ -11,6 +11,10 @@ from model.staging_leads import StagingLeads
 from model.gold_leads import Gold_leads
 from sqlalchemy import or_,and_
 from sqlalchemy import text
+from datetime import datetime
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
 import csv
 import io
 from sqlalchemy.exc import SQLAlchemyError
@@ -26,37 +30,163 @@ def GetAllStat(db:Session):
     return db.query(StatisticLeads).all()
 def GetAllStaging(db:Session):
     return db.query(StagingLeads).all()
-def DowloadProdLead(db:Session):
-    leads=db.query(Silver_leads).all()
-    output=io.StringIO()
-    write=csv.writer(output)
-    write.writerow([
-        "Nom",
-        "Prenom",
-        "Email",
-        "Fonction",
-        "Societe",
-        "Telephone",
-        "Linkedin"
-    ])
-    for lead in leads:
-        write.writerow([
-            lead.nom,
-            lead.prenom,
-            lead.email,
-            lead.fonction,
-            lead.societe,
-            lead.telephone,
-            lead.linkedin
+def DownloadProdLeadCSV(types:str,db: Session):
+    try:
+        # 1️⃣ Charger les données
+        if(types=="silver"):
+            leads = db.query(Silver_leads).all()
+        else:   
+            leads = db.query(Gold_leads).all()
+
+        
+        if not leads:
+            raise HTTPException(status_code=404, detail="Aucun lead à télécharger")
+
+        # 2️⃣ Créer le buffer avec BOM UTF-8 (pour que Excel reconnaisse l'UTF-8)
+        output = io.StringIO()
+        output.write('\ufeff')  # BOM pour UTF-8
+        
+        # 3️⃣ Créer le writer CSV
+        writer = csv.writer(
+            output, 
+            delimiter=';',           # Point-virgule pour Excel français
+            quoting=csv.QUOTE_MINIMAL,
+            lineterminator='\n'
+        )
+        
+        # 4️⃣ En-têtes
+        writer.writerow([
+            "Nom",
+            "Prénom",
+            "Email",
+            "Fonction",
+            "Société",
+            "Téléphone",
+            "LinkedIn"
         ])
+        
+        # 5️⃣ Données (gérer les None)
+        for lead in leads:
+            writer.writerow([
+                lead.nom or "",
+                lead.prenom or "",
+                lead.email or "",
+                lead.fonction or "",
+                lead.societe or "",
+                lead.telephone or "",
+                lead.linkedin or ""
+            ])
+        
+        output.seek(0)
+        
+        # 6️⃣ Nom du fichier avec timestamp
+        filename = f"leads_silver_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        
+        # 7️⃣ Retourner le fichier
+        return StreamingResponse(
+            iter([output.getvalue()]),
+            media_type="text/csv; charset=utf-8",
+            headers={
+                "Content-Disposition": f"attachment; filename={filename}",
+                "Content-Type": "text/csv; charset=utf-8"
+            }
+        )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erreur lors de la génération du CSV : {str(e)}")
+def DownloadLeadXlsx(types:str,db: Session):
+    try:
+        if(types=="silver"):
+            leads = db.query(Silver_leads).all()
+        else:   
+            leads = db.query(Gold_leads).all()
+        
+        if not leads:
+            raise HTTPException(status_code=404, detail="Aucun lead à télécharger")
 
-    output.seek(0)
-    return StreamingResponse(
-        iter([output.getvalue()]),
-        media_type="text/csv",
-        headers={"Content-Disposition": "attachment; filename=leads.csv"}
-    )
-
+        # 2️⃣ Créer le workbook
+        wb = Workbook()
+        sheet = wb.active
+        sheet.title = "Leads Silver"
+        
+        # 3️⃣ En-têtes
+        headers = ["Nom", "Prénom", "Email", "Fonction", "Société", "Téléphone", "LinkedIn"]
+        sheet.append(headers)
+        
+        # 4️⃣ Style des en-têtes
+        header_font = Font(bold=True, color="FFFFFF", size=12)
+        header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+        header_alignment = Alignment(horizontal="center", vertical="center")
+        
+        for col_num, header in enumerate(headers, 1):
+            cell = sheet.cell(row=1, column=col_num)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = header_alignment
+        
+        # 5️⃣ Ajouter les données
+        for lead in leads:
+            sheet.append([
+                lead.nom,
+                lead.prenom,
+                lead.email,
+                lead.fonction,
+                lead.societe,
+                lead.telephone,
+                lead.linkedin
+            ])
+        
+        # 6️⃣ Auto-ajuster la largeur des colonnes
+        for col_num, header in enumerate(headers, 1):
+            column_letter = get_column_letter(col_num)
+            max_length = len(header)
+            
+            for row in sheet.iter_rows(min_row=2, max_row=sheet.max_row, min_col=col_num, max_col=col_num):
+                for cell in row:
+                    if cell.value:
+                        max_length = max(max_length, len(str(cell.value)))
+            
+            # Largeur avec marge
+            adjusted_width = min(max_length + 2, 50)
+            sheet.column_dimensions[column_letter].width = adjusted_width
+        
+        # 7️⃣ Bordures pour toutes les cellules
+        thin_border = Border(
+            left=Side(style='thin'),
+            right=Side(style='thin'),
+            top=Side(style='thin'),
+            bottom=Side(style='thin')
+        )
+        
+        for row in sheet.iter_rows(min_row=1, max_row=sheet.max_row, min_col=1, max_col=len(headers)):
+            for cell in row:
+                cell.border = thin_border
+                if cell.row > 1:  # Données (pas en-têtes)
+                    cell.alignment = Alignment(vertical="center")
+        
+        # 8️⃣ Figer la première ligne
+        sheet.freeze_panes = "A2"
+        
+        # 9️⃣ Sauvegarder dans un buffer
+        output = io.BytesIO()
+        wb.save(output)
+        output.seek(0)
+        
+        # 🔟 Retourner le fichier
+        filename = f"leads_silver_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        
+        return StreamingResponse(
+            output,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f"attachment; filename={filename}"}
+        )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erreur lors de la génération du fichier : {str(e)}")
 def ToBlack(id:int,eliminer:str,db:Session):
     result =db.query(Silver_leads).filter(Silver_leads.id==id).first()
     if (not result):

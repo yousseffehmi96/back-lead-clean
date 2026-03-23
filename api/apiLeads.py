@@ -5,7 +5,6 @@ from database.db import get_db
 from service.service import *
 import service.serviceSociete as Ss
 router=APIRouter()
-
 @router.get("/silver")
 async def GetAllsilver(db: Session = Depends(get_db)):
         return SP.GetAllSilver(db)
@@ -15,9 +14,12 @@ async def GetAllGold(db: Session = Depends(get_db)):
 @router.get("/black")
 async def GetAllBlack(db: Session = Depends(get_db)):
         return SP.GetAllBlack(db)
-@router.get("/download-leads")
-def download_leads(db: Session = Depends(get_db)):
-        return SP.DowloadProdLead(db)
+@router.get("/download-leads-csv/{types}")
+def download_leads(types:str,db: Session = Depends(get_db)):
+        return SP.DownloadProdLeadCSV(types,db)
+@router.get("/download-leads-xlsx/{types}")
+def download_leads(types:str,db: Session = Depends(get_db)):
+        return SP.DownloadLeadXlsx(types,db)
 @router.post("/toblack/{id}")
 def ToBlack(id:int,eliminer:str=Body(...),db: Session = Depends(get_db)):
         return SP.ToBlack(id,eliminer,db)
