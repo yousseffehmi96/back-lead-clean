@@ -82,11 +82,11 @@ def UpdateSociete(id: int, societe_data:Societe, db: Session):
 def GetAll(db:Session):
     return db.query(societeleads).all()
 
-def AddAuto(db: Session):
+def AddAuto(db: Session,base:str):
     try:
         
         # INSERT avec RETURNING pour obtenir le nombre exact
-        result = db.execute(text("""
+        result = db.execute(text(f"""
     WITH candidates AS (
         SELECT 
             LOWER(TRIM(sl.societe)) as nom,
@@ -107,7 +107,7 @@ def AddAuto(db: Session):
             ROW_NUMBER() OVER (
                 PARTITION BY LOWER(TRIM(sl.societe)) ORDER BY sl.id
             ) as rn
-        FROM staging_leads sl
+        FROM {base} sl
         WHERE sl.email IS NOT NULL 
           AND sl.email != ''
           AND LOWER(sl.email) != 'nan'

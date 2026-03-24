@@ -215,14 +215,14 @@ def ToBlack(id:int,eliminer:str,db:Session):
             "message": "Le leads a èté blocque avec succeè"
         }
     
-def StagingToSilver(db: Session):
+def StagingToSilver(db: Session,base:str):
     try:
         # 1️⃣ INSERT INTO silver_leads depuis staging (évite les doublons)
-        result = db.execute(text("""
+        result = db.execute(text(f"""
             INSERT INTO silver_leads (nom, prenom, email, fonction, societe, telephone, linkedin)
             SELECT DISTINCT ON (email) 
                 nom, prenom, email, fonction, societe, telephone, linkedin
-            FROM staging_leads
+            FROM {base}
             WHERE email IS NOT NULL 
               AND email != '' 
               AND email != 'nan'
@@ -241,7 +241,7 @@ def StagingToSilver(db: Session):
                   OR linkedin IS NULL OR linkedin = '' OR linkedin = 'nan'
               )
               AND NOT EXISTS (
-                  SELECT 1 FROM silver_leads s WHERE s.email = staging_leads.email
+                  SELECT 1 FROM silver_leads s WHERE s.email = {base}.email
               )
             ORDER BY email, id
         """))
@@ -249,8 +249,8 @@ def StagingToSilver(db: Session):
         moved_count = result.rowcount
         
         # 2️⃣ DELETE depuis staging (ceux qui ont été déplacés + doublons internes)
-        db.execute(text("""
-            DELETE FROM staging_leads
+        db.execute(text(f"""
+            DELETE FROM {base}
             WHERE email IS NOT NULL 
               AND email != '' 
               AND email != 'nan'
@@ -317,15 +317,15 @@ def StagingToClean(db: Session):
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Erreur inattendue : {str(e)}")
 
-def StagingToGold(db: Session):
+def StagingToGold(db: Session,base:str):
     try:
         
         # 1️⃣ INSERT INTO gold_leads depuis staging (évite les doublons)
-        result = db.execute(text("""
+        result = db.execute(text(f"""
             INSERT INTO gold_leads (nom, prenom, email, fonction, societe, telephone, linkedin)
             SELECT DISTINCT ON (email) 
                 nom, prenom, email, fonction, societe, telephone, linkedin
-            FROM staging_leads
+            FROM {base}
             WHERE email IS NOT NULL 
               AND email != '' 
               AND email != 'nan'
@@ -348,7 +348,7 @@ def StagingToGold(db: Session):
               AND linkedin != '' 
               AND linkedin != 'nan'
               AND NOT EXISTS (
-                  SELECT 1 FROM gold_leads g WHERE g.email = staging_leads.email
+                  SELECT 1 FROM gold_leads g WHERE g.email = {base}.email
               )
             ORDER BY email, id
         """))
@@ -356,8 +356,8 @@ def StagingToGold(db: Session):
         moved_count = result.rowcount
         
         # 2️⃣ DELETE depuis staging (ceux qui ont été déplacés + doublons internes)
-        db.execute(text("""
-            DELETE FROM staging_leads
+        db.execute(text(f"""
+            DELETE FROM {base}
             WHERE email IS NOT NULL 
               AND email != '' 
               AND email != 'nan'
@@ -394,13 +394,13 @@ def StagingToGold(db: Session):
         raise HTTPException(status_code=500, detail=f"Erreur inattendue : {str(e)}")
         
 
-def completevoid(db:Session):
+def completevoid(db:Session,base):
     print("hhhhhh")
-def CompleteSocieteFromEmail(db: Session):
+def CompleteSocieteFromEmail(db: Session,base:str):
     try:        
         # UPDATE avec extraction du domaine en SQL pur
-        result = db.execute(text("""
-            UPDATE staging_leads
+        result = db.execute(text(f"""
+            UPDATE {base}
             SET societe = INITCAP(
                 REPLACE(
                     SPLIT_PART(SPLIT_PART(email, '@', 2), '.', 1),
@@ -429,12 +429,12 @@ def CompleteSocieteFromEmail(db: Session):
 
 
 
-def CompleteNomPrenomFromEmail(db: Session):
+def CompleteNomPrenomFromEmail(db: Session,base:str):
     try:
         
         # UPDATE avec extraction du nom et prénom en SQL pur (PostgreSQL)
-        result = db.execute(text("""
-            UPDATE staging_leads
+        result = db.execute(text(f"""
+            UPDATE {base}
             SET 
                 prenom = CASE 
                     WHEN (prenom IS NULL OR prenom = '') 

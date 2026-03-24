@@ -176,7 +176,7 @@ def SupprimerDoublons(db: Session, table: str):
         raise HTTPException(status_code=500, detail=f"Erreur inattendue : {str(e)}")
 
 
-def CompleteEmail(db: Session):
+def CompleteEmail(db: Session,base:str):
     print("🔄 Début de complétion des emails...")
     try:
         from sqlalchemy import text
@@ -187,8 +187,8 @@ def CompleteEmail(db: Session):
             raise HTTPException(status_code=404, detail="Aucune société trouvée en base.")
 
         # UPDATE avec JOIN - UNIQUEMENT si email est NULL ou vide
-        result = db.execute(text("""
-            UPDATE staging_leads sl
+        result = db.execute(text(f"""
+            UPDATE {base} sl
             SET email = CONCAT(sl.prenom, '.', sl.nom, '@', s.domaine, '.', s.extension)
             FROM societe_leads s
             WHERE UPPER(sl.societe) = UPPER(s.nom)
@@ -219,7 +219,7 @@ def CompleteEmail(db: Session):
         raise HTTPException(status_code=500, detail=f"Erreur inattendue : {str(e)}")
 
 
-def CheckContactsBlack(db: Session):
+def CheckContactsBlack(db: Session,base:str):
     try:
         from sqlalchemy import text
         
@@ -230,14 +230,17 @@ def CheckContactsBlack(db: Session):
             return {"blacklisted_removed": 0}
 
         # 2️⃣ Compter les lignes avant suppression
-        total_before = db.query(StagingLeads).count()
+        if base=="staging_leads":
+            total_before = db.query(StagingLeads).count()
+        else:
+            total_before = db.query(cleaningleads).count()
         
         if total_before == 0:
-            raise HTTPException(status_code=404, detail="Aucun lead en staging.")
+            raise HTTPException(status_code=404, detail="Aucun lead en {base}.")
 
         # 3️⃣ DELETE avec JOIN en SQL pur (ultra-rapide)
-        result = db.execute(text("""
-            DELETE FROM staging_leads
+        result = db.execute(text(f"""
+            DELETE FROM {base}
             WHERE email IN (
                 SELECT email FROM blacklist_leads
             )

@@ -31,40 +31,41 @@ async def GetAllClean(db:Session=Depends(get_db)):
 async def GetAllClean(db:Session=Depends(get_db)):
         return SP.GetAllStat(db)
 
-@router.post("/staging-dispatch")
-async def StagingDispatch(filename: str = Body(...), db: Session = Depends(get_db)):
+@router.post("/staging-dispatch/{base}")
+async def StagingDispatch(base:str,filename: str = Body(...), db: Session = Depends(get_db)):
     try:
         result = {}
         
         # 1. Compléter les emails d'abord
-        r2 = CompleteEmail(db)
+        r2 = CompleteEmail(db,base)
         result.update(r2)
         
         # 2. Compléter societe + nom/prénom depuis les emails
-        r4 = SP.CompleteSocieteFromEmail(db)
+        r4 = SP.CompleteSocieteFromEmail(db,base)
         result.update(r4)
 
-        r5 = SP.CompleteNomPrenomFromEmail(db)
-        result.update(r5)
+        r5 = SP.CompleteNomPrenomFromEmail(db,base)
+        result.update(db)
 
         # 3. Maintenant que societe est remplie → AddAuto fonctionne
-        r1 = Ss.AddAuto(db)
+        r1 = Ss.AddAuto(db,base)
         result.update(r1)
         
         # 4. Suite du pipeline
-        r3 = CheckContactsBlack(db)
+        r3 = CheckContactsBlack(db,base)
         result.update(r3)
 
         db.expire_all()
 
-        r6 = SP.StagingToGold(db)
+        r6 = SP.StagingToGold(db,base)
         result.update(r6)
 
-        r7 = SP.StagingToSilver(db)
+        r7 = SP.StagingToSilver(db,base)
         result.update(r7)
-
-        r8 = SP.StagingToClean(db)
-        result.update(r8)
+        if(base=="staging_leads"):
+                print("moved_to_cleaneeeeeeeee")
+                r8 = SP.StagingToClean(db)
+                result.update(r8)
         
         if filename:
             result["filename"] = filename
