@@ -35,7 +35,8 @@ async def GetAllClean(db:Session=Depends(get_db)):
 async def StagingDispatch(base:str,filename: str = Body(...), db: Session = Depends(get_db)):
     try:
         result = {}
-        
+        r1 = Ss.AddAuto(db,base)
+        result.update(r1)
         # 1. Compléter les emails d'abord
         r2 = CompleteEmail(db,base)
         result.update(r2)
@@ -48,8 +49,7 @@ async def StagingDispatch(base:str,filename: str = Body(...), db: Session = Depe
         result.update(db)
 
         # 3. Maintenant que societe est remplie → AddAuto fonctionne
-        r1 = Ss.AddAuto(db,base)
-        result.update(r1)
+       
         
         # 4. Suite du pipeline
         r3 = CheckContactsBlack(db,base)
