@@ -472,4 +472,53 @@ def CompleteNomPrenomFromEmail(db: Session,base:str):
         raise HTTPException(status_code=500, detail=f"Erreur inattendue : {str(e)}")
 
 
+def SilverToGold(db:Session,id:int):
+    try:
+            print("id")
+            silver=db.query(Silver_leads).filter(
+                Silver_leads.id==id,
+                Silver_leads.fonction != '' ,
+                Silver_leads.fonction!= 'nan',
+               Silver_leads.fonction.isnot(None),
+               Silver_leads.linkedin != '' ,
+                Silver_leads.linkedin!= 'nan',
+               Silver_leads.linkedin.isnot(None),
+               Silver_leads.telephone != '' ,
+                Silver_leads.telephone!= 'nan',
+               Silver_leads.telephone.isnot(None)
+            ).first()
+            if silver is None:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Lead incomplet → impossible de passer en GOLD"
+                    )
 
+            print(silver)
+
+            gold = Gold_leads(
+                    email=silver.email,
+                    nom=silver.nom,
+                    prenom=silver.prenom,
+                    fonction=silver.fonction,
+                    societe=silver.societe,
+                    telephone=silver.telephone,
+                    linkedin=silver.linkedin
+                )
+
+
+
+            db.add(gold)
+            db.delete(silver)
+            db.commit()
+            return {
+                    "message": "Lead ajouté avec succès dans GOLD"
+}
+
+    
+    except SQLAlchemyError as e:
+        db.rollback()
+        print(str(e))
+        raise HTTPException(status_code=500, detail=f"Erreur base de données : {str(e)}")
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Erreur inattendue : {str(e)}")

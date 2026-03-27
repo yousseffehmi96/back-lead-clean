@@ -77,3 +77,7 @@ async def StagingDispatch(base:str,filename: str = Body(...), db: Session = Depe
         import traceback
         print("ERREUR COMPLETE:", traceback.format_exc())
         raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/togold/{id}")
+async def silvertogold(id:int,db:Session=Depends(get_db)):
+        return  SP.SilverToGold(db,id)
