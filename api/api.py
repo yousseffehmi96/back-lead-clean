@@ -11,15 +11,16 @@ async def Upload(file: UploadFile = File(...), db: Session = Depends(get_db)):
     stats["filename"]=file.filename
     stats.update(LoadFileToBd(file, db))
     print("stat lena",stats)
-    stats.update(SupprimerDoublons(db,"staging_leads"))
-    print("stat lena2",stats)
-    """nettoyer_contact(db)"""
+    nettoyer_contact(db)
     print("stat lena3",stats)
     stats.setdefault("emails_completed", 0)
     stats.setdefault("blacklisted_removed", 0)
     stats.setdefault("moved_to_silver", 0)
     stats.setdefault("moved_to_gold", 0)
     stats.setdefault("moved_to_clean", 0)
+    stats.setdefault("staging_vs_silver", 0)
+    stats.setdefault("staging_vs_gold", 0)
+    stats.setdefault("staging_internal", 0)
     static = Static(**stats) 
     SaveStatic(db,static)
     return stats

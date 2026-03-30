@@ -142,8 +142,7 @@ def LoadFileToBd(file: UploadFile, db: Session):
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Erreur : {str(e)}")
-
-def SupprimerDoublons(db: Session, table: str):
+def SupprimerDoublonsMemetABLE(db: Session, table: str):
     try:
         allowed_tables = {"staging_leads", "cleaning_leads", "silver_leads"}
         if table not in allowed_tables:
@@ -168,6 +167,84 @@ def SupprimerDoublons(db: Session, table: str):
 
     except HTTPException:
         raise
+    except SQLAlchemyError as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Erreur suppression doublons : {str(e)}")
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Erreur inattendue : {str(e)}")
+def SupprimerDoublons(db: Session):
+    try:
+        results = {}
+        total_deleted = 0
+
+        query_staging_silver = text("""
+            DELETE FROM staging_leads
+            WHERE id IN (
+                SELECT s.id
+                FROM staging_leads s
+                INNER JOIN silver_leads sl ON 
+                    COALESCE(s.email, '') = COALESCE(sl.email, '') AND
+                    COALESCE(s.nom, '') = COALESCE(sl.nom, '') AND
+                    COALESCE(s.prenom, '') = COALESCE(sl.prenom, '')
+                WHERE s.email IS NOT NULL AND s.email != ''
+            )
+        """)
+        res1 = db.execute(query_staging_silver)
+        staging_vs_silver = res1.rowcount if hasattr(res1, "rowcount") else 0
+        results["staging_vs_silver"] = staging_vs_silver
+        total_deleted += staging_vs_silver
+        print(f"✅ STAGING vs SILVER: {staging_vs_silver} doublons supprimés")
+
+        query_staging_gold = text("""
+            DELETE FROM staging_leads
+            WHERE id IN (
+                SELECT s.id
+                FROM staging_leads s
+                INNER JOIN gold_leads g ON 
+                    COALESCE(s.email, '') = COALESCE(g.email, '') AND
+                    COALESCE(s.nom, '') = COALESCE(g.nom, '') AND
+                    COALESCE(s.prenom, '') = COALESCE(g.prenom, '')
+                WHERE s.email IS NOT NULL AND s.email != ''
+            )
+        """)
+        res2 = db.execute(query_staging_gold)
+        staging_vs_gold = res2.rowcount if hasattr(res2, "rowcount") else 0
+        results["staging_vs_gold"] = staging_vs_gold
+        total_deleted += staging_vs_gold
+        print(f"✅ STAGING vs GOLD: {staging_vs_gold} doublons supprimés")
+
+
+        # 4️⃣ Supprimer doublons dans STAGING lui-même
+        query_staging_internal = text("""
+            DELETE FROM staging_leads
+            WHERE id NOT IN (
+                SELECT MIN(id)
+                FROM staging_leads
+                GROUP BY 
+                    COALESCE(nom, ''),
+                    COALESCE(prenom, ''),
+                    COALESCE(email, ''),
+                    COALESCE(fonction, ''),
+                    COALESCE(societe, '')
+            )
+        """)
+        res4 = db.execute(query_staging_internal)
+        staging_internal = res4.rowcount if hasattr(res4, "rowcount") else 0
+        results["staging_internal"] = staging_internal
+        total_deleted += staging_internal
+        print(f"✅ STAGING interne: {staging_internal} doublons supprimés")
+
+        db.commit()
+        
+        return {
+            "message": "Suppression des doublons terminée",
+            "total_deleted": total_deleted,
+            "staging_vs_silver": staging_vs_silver,
+            "staging_vs_gold": staging_vs_gold,
+            "staging_internal": staging_internal
+        }
+
     except SQLAlchemyError as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Erreur suppression doublons : {str(e)}")
@@ -219,55 +296,31 @@ def CompleteEmail(db: Session,base:str):
         raise HTTPException(status_code=500, detail=f"Erreur inattendue : {str(e)}")
 
 
-def CheckContactsBlack(db: Session,base:str):
+# Dans service/service.py
+def CheckContactsBlack(db: Session, base: str):
     try:
-        from sqlalchemy import text
+        # Vérifier s'il reste des leads
+        count_query = text(f"SELECT COUNT(*) FROM {base}")
+        result = db.execute(count_query).scalar()
         
-        # 1️⃣ Vérifier s'il y a des emails blacklistés
-        count_blacklist = db.query(blacklistLeads).count()
+        if result == 0:
+            print(f"⚠️ Aucun lead restant dans {base}, skip CheckContactsBlack")
+            return {"blacklisted_removed": 0}  # ✅ Retourner un dict
         
-        if count_blacklist == 0:
-            return {"blacklisted_removed": 0}
-
-        # 2️⃣ Compter les lignes avant suppression
-        if base=="staging_leads":
-            total_before = db.query(StagingLeads).count()
-        else:
-            total_before = db.query(cleaningleads).count()
-        
-        if total_before == 0:
-            raise HTTPException(status_code=404, detail="Aucun lead en {base}.")
-
-        # 3️⃣ DELETE avec JOIN en SQL pur (ultra-rapide)
-        result = db.execute(text(f"""
+        # Suite de votre logique existante...
+        query = text(f"""
             DELETE FROM {base}
-            WHERE email IN (
-                SELECT email FROM blacklist_leads
-            )
-        """))
-        
+            WHERE email IN (SELECT email FROM blacklist_leads)
+        """)
+        res = db.execute(query)
         db.commit()
-        blacklisted_removed = result.rowcount
+        deleted_count = res.rowcount if hasattr(res, "rowcount") else 0
+        print(f"✅ {deleted_count} leads blacklistés supprimés de {base}")
+        return {"blacklisted_removed": deleted_count}  # ✅ Retourner un dict
         
-        # 4️⃣ Compter les lignes restantes
-        total_after = db.query(StagingLeads).count()
-        
-        print(f"✅ {blacklisted_removed} contacts blacklistés supprimés")
-        print(f"📊 Lignes restantes: {total_after}")
-        
-        return {
-            "blacklisted_removed": blacklisted_removed,
-            "lignes_restantes": total_after
-        }
-
-    except HTTPException:
-        raise
     except SQLAlchemyError as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Erreur base de données : {str(e)}")
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"Erreur inattendue : {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Erreur CheckContactsBlack : {str(e)}")
 
 def nettoyer_contact(db: Session):
     try:
@@ -376,7 +429,6 @@ def SaveStatic(db: Session,static:Static):
         statics = StatisticLeads(
                 filename=static.filename,
                 inserted_rows=static.inserted_rows if static.inserted_rows else 0,
-                duplicates_deleted=static.duplicates_deleted if static.duplicates_deleted else 0,
                 emails_completed=static.emails_completed if static.emails_completed else 0,
                 blacklisted_removed=static.blacklisted_removed if static.blacklisted_removed else 0,
                 moved_to_silver=static.moved_to_silver if static.moved_to_silver else 0,
@@ -393,21 +445,49 @@ def SaveStatic(db: Session,static:Static):
    except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Erreur inattendue : {str(e)}")
-def updatestat(db:Session,result:dict):
-        print("lena")
-        query = text("""
-            UPDATE statistic_leads
-            SET 
-                moved_to_silver = :moved_to_silver,
-                moved_to_clean  = :moved_to_clean,
-                moved_to_gold   = :moved_to_gold
-            WHERE filename = :filename
-        """)
-        db.execute(query, {
-            "moved_to_silver": result["moved_to_silver"],
-            "moved_to_clean":  result["moved_to_clean"],
-            "moved_to_gold":   result["moved_to_gold"],
-            "filename":        result["filename"],
-        })
-        db.commit()
+def updatestat(db: Session, result: dict):
+    print("lena")
+
+    query = text("""
+        UPDATE statistic_leads
+        SET 
+            moved_to_silver     = :moved_to_silver,
+            moved_to_clean      = :moved_to_clean,
+            moved_to_gold       = :moved_to_gold,
+
+            added_societes      = :added_societes,
+            emails_completed    = :emails_completed,
+            societe_completed   = :societe_completed,
+
+            total_deleted       = :total_deleted,
+            staging_vs_silver   = :staging_vs_silver,
+            staging_vs_gold     = :staging_vs_gold,
+            staging_internal    = :staging_internal,
+
+            blacklisted_removed = :blacklisted_removed
+
+        WHERE filename = :filename
+    """)
+
+    db.execute(query, {
+        "moved_to_silver": result.get("moved_to_silver", 0),
+        "moved_to_clean":  result.get("moved_to_clean", 0),
+        "moved_to_gold":   result.get("moved_to_gold", 0),
+
+        "added_societes": result.get("added_societes", 0),
+        "emails_completed": result.get("emails_completed", 0),
+        "societe_completed": result.get("societe_completed", 0),
+
+        "total_deleted": result.get("total_deleted", 0),
+        "staging_vs_silver": result.get("staging_vs_silver", 0),
+        "staging_vs_gold": result.get("staging_vs_gold", 0),
+        "staging_internal": result.get("staging_internal", 0),
+
+        "blacklisted_removed": result.get("blacklisted_removed", 0),
+
+        "filename": result.get("filename")
+    })
+
+    db.commit()
+
 

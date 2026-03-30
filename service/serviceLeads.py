@@ -303,12 +303,13 @@ def StagingToClean(db: Session):
         db.execute(text("""
             DELETE FROM staging_leads
         """))
-        se.SupprimerDoublons(db,"cleaning_leads")
+        clean=se.SupprimerDoublonsMemetABLE(db,"cleaning_leads")
+        print("ffffffffffff",clean)
         db.commit()
 
         
-        print(f"✅ {moved_count} leads déplacés vers Cleaning")
-        return {"moved_to_clean": moved_count}
+        print(f"✅ {moved_count-clean["duplicates_deleted"]} leads déplacés vers Cleaning")
+        return {"moved_to_clean": moved_count-clean["duplicates_deleted"]}
 
     except SQLAlchemyError as e:
         db.rollback()
@@ -320,7 +321,7 @@ def StagingToClean(db: Session):
 def StagingToGold(db: Session,base:str):
     try:
         
-        # 1️⃣ INSERT INTO gold_leads depuis staging (évite les doublons)
+        #  INSERT INTO gold_leads depuis staging (évite les doublons)
         result = db.execute(text(f"""
             INSERT INTO gold_leads (nom, prenom, email, fonction, societe, telephone, linkedin)
             SELECT DISTINCT ON (email) 
@@ -352,10 +353,10 @@ def StagingToGold(db: Session,base:str):
               )
             ORDER BY email, id
         """))
-        
+        print(result)
         moved_count = result.rowcount
         
-        # 2️⃣ DELETE depuis staging (ceux qui ont été déplacés + doublons internes)
+        #  DELETE depuis staging (ceux qui ont été déplacés + doublons internes)
         db.execute(text(f"""
             DELETE FROM {base}
             WHERE email IS NOT NULL 

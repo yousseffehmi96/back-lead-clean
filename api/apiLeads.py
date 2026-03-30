@@ -37,27 +37,24 @@ async def StagingDispatch(base:str,filename: str = Body(...), db: Session = Depe
         result = {}
         r1 = Ss.AddAuto(db,base)
         result.update(r1)
-        # 1. Compléter les emails d'abord
         r2 = CompleteEmail(db,base)
         result.update(r2)
         
-        # 2. Compléter societe + nom/prénom depuis les emails
         r4 = SP.CompleteSocieteFromEmail(db,base)
         result.update(r4)
 
         r5 = SP.CompleteNomPrenomFromEmail(db,base)
         result.update(db)
 
-        # 3. Maintenant que societe est remplie → AddAuto fonctionne
-       
+        result.update(SupprimerDoublons(db))
         
-        # 4. Suite du pipeline
         r3 = CheckContactsBlack(db,base)
         result.update(r3)
 
         db.expire_all()
 
         r6 = SP.StagingToGold(db,base)
+        
         result.update(r6)
 
         r7 = SP.StagingToSilver(db,base)
