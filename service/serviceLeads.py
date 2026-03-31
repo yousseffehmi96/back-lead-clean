@@ -299,7 +299,7 @@ def StagingToClean(db: Session):
         
         moved_count = result.rowcount
         
-        # 2️⃣ DELETE tous les leads de staging
+        # DELETE tous les leads de staging
         db.execute(text("""
             DELETE FROM staging_leads
         """))
@@ -395,8 +395,7 @@ def StagingToGold(db: Session,base:str):
         raise HTTPException(status_code=500, detail=f"Erreur inattendue : {str(e)}")
         
 
-def completevoid(db:Session,base):
-    print("hhhhhh")
+
 def CompleteSocieteFromEmail(db: Session,base:str):
     try:        
         # UPDATE avec extraction du domaine en SQL pur

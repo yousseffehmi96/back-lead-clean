@@ -82,63 +82,27 @@ def UpdateSociete(id: int, societe_data:Societe, db: Session):
 def GetAll(db:Session):
     return db.query(societeleads).all()
 
-def AddAuto(db: Session,base:str):
+def AddAuto(db: Session, base: str):
     try:
-        
-        # INSERT avec RETURNING pour obtenir le nombre exact
+        # Insérer les sociétés uniques à partir des emails
         result = db.execute(text(f"""
-    WITH candidates AS (
-        SELECT 
-            LOWER(TRIM(sl.societe)) as nom,
-            -- Tout ce qui est après @ et avant le dernier point
-            LOWER(
-                REGEXP_REPLACE(
-                    SPLIT_PART(sl.email, '@', 2),
-                    '\.[^.]+$', ''   -- supprime .fr / .com / .net à la fin
-                )
-            ) as domaine,
-            -- Seulement l'extension finale (.fr, .com, .net...)
-            LOWER(
-                REGEXP_REPLACE(
-                    SPLIT_PART(sl.email, '@', 2),
-                    '^.*\.', ''      -- garde uniquement après le dernier point
-                )
-            ) as extension,
-            ROW_NUMBER() OVER (
-                PARTITION BY LOWER(TRIM(sl.societe)) ORDER BY sl.id
-            ) as rn
-        FROM {base} sl
-        WHERE sl.email IS NOT NULL 
-          AND sl.email != ''
-          AND LOWER(sl.email) != 'nan'
-          AND sl.societe IS NOT NULL
-          AND sl.societe != ''
-          AND LOWER(sl.societe) != 'nan'
-          AND POSITION('@' IN sl.email) > 0
-          AND POSITION('.' IN SPLIT_PART(sl.email, '@', 2)) > 0
-    ),
-    new_societes AS (
-        INSERT INTO societe_leads (nom, domaine, extension)
-        SELECT c.nom, c.domaine, c.extension
-        FROM candidates c
-        WHERE c.rn = 1
-          AND c.domaine IS NOT NULL
-          AND c.domaine != ''
-          AND c.extension IS NOT NULL
-          AND c.extension != ''
-          AND NOT EXISTS (
-              SELECT 1 FROM societe_leads s 
-              WHERE LOWER(s.nom) = c.nom
-          )
-        RETURNING id
-    )
-    SELECT COUNT(*) FROM new_societes
-"""))
+            INSERT INTO societe_leads (nom, domaine, extension)
+            SELECT DISTINCT
+                TRIM(sl.societe) AS nom,
+                LOWER(SPLIT_PART(SPLIT_PART(sl.email, '@', 2), '.', 1)) AS domaine,
+                LOWER(SPLIT_PART(sl.email, '.', -1)) AS extension
+            FROM {base} sl
+            WHERE sl.email IS NOT NULL AND sl.email != '' AND LOWER(sl.email) != 'nan'
+              AND sl.societe IS NOT NULL AND sl.societe != '' AND LOWER(sl.societe) != 'nan'
+              AND NOT EXISTS (
+                  SELECT 1 FROM societe_leads s 
+                  WHERE LOWER(s.nom) = LOWER(TRIM(sl.societe))
+              )
+        """))
         
         db.commit()
         
-        added_count = result.scalar()
-        
+        added_count = result.rowcount  # nombre de lignes insérées
         print(f"✅ {added_count} nouvelles sociétés ajoutées")
         return {"added_societes": added_count}
 

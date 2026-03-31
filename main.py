@@ -4,12 +4,13 @@ from api.apiSociete import routes as societe_router
 from api.apiLeads import router as Leads_router
 from fastapi.middleware.cors import CORSMiddleware
 from database.db import engine, Base
-
+from api.apiValidationRules import routes as validation_rules_router
 app=FastAPI()
 Base.metadata.create_all(bind=engine)
 app.include_router(api_router)
 app.include_router(societe_router)
 app.include_router(Leads_router)
+app.include_router(validation_rules_router)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
