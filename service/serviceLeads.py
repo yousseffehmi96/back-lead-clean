@@ -189,7 +189,7 @@ def DownloadLeadXlsx(types:str,db: Session):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erreur lors de la génération du fichier : {str(e)}")
 def ToBlack(id:int,eliminer:str,db:Session):
-    result =db.query(Silver_leads).filter(Silver_leads.id==id).first()
+    result =db.query(Gold_leads).filter(Gold_leads.id==id).first()
     if (not result):
         raise HTTPException(
                status_code=404,
@@ -207,7 +207,6 @@ def ToBlack(id:int,eliminer:str,db:Session):
                     linkedin= result.linkedin,
                     eliminer=eliminer
                 )
-    print(blocklead)
     db.add(blocklead)
     db.delete(result)
     db.commit()

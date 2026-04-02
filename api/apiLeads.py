@@ -22,6 +22,7 @@ def download_leads(types:str,db: Session = Depends(get_db)):
         return SP.DownloadLeadXlsx(types,db)
 @router.post("/toblack/{id}")
 def ToBlack(id:int,eliminer:str=Body(...),db: Session = Depends(get_db)):
+        print("lena")
         return SP.ToBlack(id,eliminer,db)
 @router.get("/clean")
 async def GetAllClean(db:Session=Depends(get_db)):
