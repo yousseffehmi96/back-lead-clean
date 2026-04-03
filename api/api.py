@@ -8,6 +8,7 @@ Router=APIRouter()
 async def Upload(userid: str = Form(...),file: UploadFile = File(...),db: Session = Depends(get_db)):
   
     stats = {} 
+    print('usedis',userid)
     stats["filename"]=file.filename
     stats["iduser"]=userid
     stats.update(LoadFileToBd(file, db))
