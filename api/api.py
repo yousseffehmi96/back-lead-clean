@@ -24,6 +24,7 @@ async def Upload(userid: str = Form(...),file: UploadFile = File(...),db: Sessio
     stats.setdefault("staging_vs_gold", 0)
     stats.setdefault("staging_internal", 0)
     static = Static(**stats) 
+    print("hethi static")
     print("kikiki")
     SaveStatic(db,static)
     return stats
