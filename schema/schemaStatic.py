@@ -12,3 +12,4 @@ class Static(BaseModel):
     staging_vs_silver:int
     staging_vs_gold:int
     staging_internal:int    
+    iduser:str

@@ -428,6 +428,7 @@ def SaveStatic(db: Session,static:Static):
    try:
         statics = StatisticLeads(
                 filename=static.filename,
+                iduser=static.iduser,
                 inserted_rows=static.inserted_rows if static.inserted_rows else 0,
                 emails_completed=static.emails_completed if static.emails_completed else 0,
                 blacklisted_removed=static.blacklisted_removed if static.blacklisted_removed else 0,
@@ -435,6 +436,7 @@ def SaveStatic(db: Session,static:Static):
                 moved_to_clean=static.moved_to_clean if static.moved_to_clean else 0,
                 moved_to_gold=static.moved_to_gold if static.moved_to_gold else 0,
 )
+        print("statics",statics)
         db.add(statics)
         db.commit()
    except HTTPException:

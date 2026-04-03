@@ -10,8 +10,8 @@ class StatisticLeads(Base):
     inserted_rows = Column(Integer)
 
     emails_completed = Column(Integer)
-    societe_completed = Column(Integer)   # ✅ ajouté
-    added_societes = Column(Integer)      # ✅ ajouté
+    societe_completed = Column(Integer)  
+    added_societes = Column(Integer)      
 
     blacklisted_removed = Column(Integer)
 
@@ -23,7 +23,8 @@ class StatisticLeads(Base):
     staging_vs_gold = Column(Integer)
     staging_internal = Column(Integer)
 
-    total_deleted = Column(Integer)       # ✅ ajouté
+    total_deleted = Column(Integer)
+    iduser=Column(Text)       
 
     created_at = Column(
         TIMESTAMP,
