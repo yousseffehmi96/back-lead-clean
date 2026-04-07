@@ -12,6 +12,7 @@ class cleaningleads(Base):
     societe = Column(String(150))
     telephone = Column(String(50))
     linkedin = Column(Text)
+    location = Column(Text)
 
     created_at = Column(
         TIMESTAMP,

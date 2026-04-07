@@ -12,6 +12,7 @@ class blacklistLeads(Base):
     societe = Column(String(150))
     telephone = Column(String(50))
     linkedin = Column(Text)
+    location = Column(Text)
     eliminer = Column(Enum("Unsubscribe", "archive", name="eliminer_enum"))
     created_at = Column(
         TIMESTAMP,

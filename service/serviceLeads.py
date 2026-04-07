@@ -63,7 +63,8 @@ def DownloadProdLeadCSV(types:str,db: Session):
             "Fonction",
             "Société",
             "Téléphone",
-            "LinkedIn"
+            "LinkedIn",
+            "Location"
         ])
         
         # 5️⃣ Données (gérer les None)
@@ -75,7 +76,8 @@ def DownloadProdLeadCSV(types:str,db: Session):
                 lead.fonction or "",
                 lead.societe or "",
                 lead.telephone or "",
-                lead.linkedin or ""
+                lead.linkedin or "",
+                lead.location or ""
             ])
         
         output.seek(0)
@@ -113,7 +115,7 @@ def DownloadLeadXlsx(types:str,db: Session):
         sheet.title = "Leads Silver"
         
         # 3️⃣ En-têtes
-        headers = ["Nom", "Prénom", "Email", "Fonction", "Société", "Téléphone", "LinkedIn"]
+        headers = ["Nom", "Prénom", "Email", "Fonction", "Société", "Téléphone", "LinkedIn", "Location"]
         sheet.append(headers)
         
         # 4️⃣ Style des en-têtes
@@ -136,7 +138,8 @@ def DownloadLeadXlsx(types:str,db: Session):
                 lead.fonction,
                 lead.societe,
                 lead.telephone,
-                lead.linkedin
+                lead.linkedin,
+                lead.location
             ])
         
         # 6️⃣ Auto-ajuster la largeur des colonnes
@@ -205,6 +208,7 @@ def ToBlack(id:int,eliminer:str,db:Session):
                     societe= result.societe,
                     telephone=result.telephone,
                     linkedin= result.linkedin,
+                    location=result.location,
                     eliminer=eliminer
                 )
     db.add(blocklead)
@@ -218,9 +222,9 @@ def StagingToSilver(db: Session,base:str):
     try:
         # 1️⃣ INSERT INTO silver_leads depuis staging (évite les doublons)
         result = db.execute(text(f"""
-            INSERT INTO silver_leads (nom, prenom, email, fonction, societe, telephone, linkedin)
+            INSERT INTO silver_leads (nom, prenom, email, fonction, societe, telephone, linkedin, location)
             SELECT DISTINCT ON (email) 
-                nom, prenom, email, fonction, societe, telephone, linkedin
+                nom, prenom, email, fonction, societe, telephone, linkedin, location
             FROM {base}
             WHERE email IS NOT NULL 
               AND email != '' 
@@ -285,9 +289,9 @@ def StagingToClean(db: Session):
         
         # 1️⃣ INSERT INTO cleaning_leads depuis staging (évite les doublons)
         result = db.execute(text("""
-            INSERT INTO cleaning_leads (nom, prenom, email, fonction, societe, telephone, linkedin)
+            INSERT INTO cleaning_leads (nom, prenom, email, fonction, societe, telephone, linkedin, location)
             SELECT DISTINCT ON (COALESCE(email, id::text)) 
-                nom, prenom, email, fonction, societe, telephone, linkedin
+                nom, prenom, email, fonction, societe, telephone, linkedin, location
             FROM staging_leads sl
             WHERE email IS NULL 
                OR NOT EXISTS (
@@ -322,9 +326,9 @@ def StagingToGold(db: Session,base:str):
         
         #  INSERT INTO gold_leads depuis staging (évite les doublons)
         result = db.execute(text(f"""
-            INSERT INTO gold_leads (nom, prenom, email, fonction, societe, telephone, linkedin)
+            INSERT INTO gold_leads (nom, prenom, email, fonction, societe, telephone, linkedin, location)
             SELECT DISTINCT ON (email) 
-                nom, prenom, email, fonction, societe, telephone, linkedin
+                nom, prenom, email, fonction, societe, telephone, linkedin, location
             FROM {base}
             WHERE email IS NOT NULL 
               AND email != '' 
@@ -397,20 +401,22 @@ def StagingToGold(db: Session,base:str):
 
 def CompleteSocieteFromEmail(db: Session,base:str):
     try:        
-        # UPDATE avec extraction du domaine en SQL pur
+        # Compléter societe depuis la table societe_leads à partir du domaine email
         result = db.execute(text(f"""
             UPDATE {base}
-            SET societe = INITCAP(
-                REPLACE(
-                    SPLIT_PART(SPLIT_PART(email, '@', 2), '.', 1),
-                    '-',
-                    ' '
-                )
-            )
-            WHERE email IS NOT NULL 
-              AND email != ''
-              AND email LIKE '%@%.%'
-              AND (societe IS NULL OR societe = '')
+            SET societe = s.nom
+            FROM societe_leads s
+            WHERE ({base}.societe IS NULL OR {base}.societe = '' OR LOWER({base}.societe) = 'nan')
+              AND {base}.email IS NOT NULL
+              AND {base}.email != ''
+              AND LOWER({base}.email) != 'nan'
+              AND {base}.email LIKE '%@%.%'
+              AND LOWER(TRIM(s.domaine)) = LOWER(TRIM(SPLIT_PART(SPLIT_PART({base}.email, '@', 2), '.', 1)))
+              AND (
+                    s.extension IS NULL
+                    OR s.extension = ''
+                    OR LOWER(TRIM(s.extension)) = LOWER(TRIM(SPLIT_PART({base}.email, '.', -1)))
+              )
         """))
         
         db.commit()
@@ -501,7 +507,8 @@ def SilverToGold(db:Session,id:int):
                     fonction=silver.fonction,
                     societe=silver.societe,
                     telephone=silver.telephone,
-                    linkedin=silver.linkedin
+                    linkedin=silver.linkedin,
+                    location=silver.location
                 )
 
 

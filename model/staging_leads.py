@@ -12,11 +12,12 @@ class StagingLeads(Base):
     societe = Column(Text, nullable=True)
     telephone = Column(Text, nullable=True)
     linkedin = Column(Text, nullable=True)
+    location = Column(Text, nullable=True)
     created_at = Column(
         TIMESTAMP,
         server_default=text("CURRENT_TIMESTAMP")
     )
-    def __init__(self,nom,prenom,email,fonction,societe,telephone,linkedin):
+    def __init__(self,nom,prenom,email,fonction,societe,telephone,linkedin,location=None):
         self.nom=nom
         self.prenom=prenom
         self.email=email
@@ -24,6 +25,7 @@ class StagingLeads(Base):
         self.telephone=telephone
         self.societe=societe
         self.linkedin=linkedin
+        self.location=location
     def get_nom(self):
         return self.nom
 
@@ -44,6 +46,8 @@ class StagingLeads(Base):
 
     def get_linkedin(self):
         return self.linkedin
+    def get_location(self):
+        return self.location
     def set_nom(self, nom):
         self.nom = nom
     def set_prenom(self, prenom):
@@ -58,5 +62,7 @@ class StagingLeads(Base):
         self.telephone = telephone
     def set_linkedin(self, linkedin):
         self.linkedin = linkedin
+    def set_location(self, location):
+        self.location = location
     def __str__(self):
         return f"StagingLeads(id={self.id}, nom={self.nom}, prenom={self.prenom},tel={self.telephone}, email={self.email})"

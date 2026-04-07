@@ -14,6 +14,8 @@ from schema.schemaStatic import Static
 import unicodedata
 import openpyxl
 import io
+
+
 def normalize_col(col: str) -> str:
     result = unicodedata.normalize('NFKD', str(col)).encode('ascii', 'ignore').decode('ascii').strip().lower()
     result = result.replace("'", " ").replace("'", " ").replace("`", " ")
@@ -27,9 +29,11 @@ def LoadFileToBd(file: UploadFile, db: Session):
         "Societe":   ["societe", "company", "company name", "entreprise", "organization", "nom de l entreprise"],
         "Telephone": ["telephone", "tel", "phone", "mobile", "gsm"],
         "Linkedin":  ["linkedin", "cnx et msg linkedin"],
+        "Location":  ["location", "lieu", "ville", "pays"],
     }
  
     try:
+        
         file.file.seek(0)
  
         # 📄 CSV
@@ -82,12 +86,12 @@ def LoadFileToBd(file: UploadFile, db: Session):
         print(f"🔧 Colonnes après suppression des doublons: {df.columns.tolist()}")
  
         # ➕ Ajouter colonnes manquantes
-        for col in ["Nom", "Prenom", "Email", "Fonction", "Societe", "Telephone", "Linkedin"]:
+        for col in ["Nom", "Prenom", "Email", "Fonction", "Societe", "Telephone", "Linkedin", "Location"]:
             if col not in df.columns:
                 df[col] = None
  
-        # ✅ SÉLECTIONNER UNIQUEMENT LES 7 COLONNES NÉCESSAIRES
-        df_clean = df[["Nom", "Prenom", "Email", "Fonction", "Societe", "Telephone", "Linkedin"]].copy()
+        # ✅ SÉLECTIONNER UNIQUEMENT LES 8 COLONNES NÉCESSAIRES
+        df_clean = df[["Nom", "Prenom", "Email", "Fonction", "Societe", "Telephone", "Linkedin", "Location"]].copy()
         
         print(f"✅ Colonnes sélectionnées: {df_clean.columns.tolist()} (Total: {len(df_clean.columns)})")
 
@@ -105,7 +109,7 @@ def LoadFileToBd(file: UploadFile, db: Session):
         df_clean = df_clean.map(get_val)
         
         # Renommer les colonnes en minuscules pour le mapping
-        df_clean.columns = ["nom", "prenom", "email", "fonction", "societe", "telephone", "linkedin"]
+        df_clean.columns = ["nom", "prenom", "email", "fonction", "societe", "telephone", "linkedin", "location"]
 
         # 🧹 NETTOYAGE AVANT INSERTION
         print("🧹 Nettoyage des données...")
@@ -114,6 +118,7 @@ def LoadFileToBd(file: UploadFile, db: Session):
         df_clean['prenom'] = df_clean['prenom'].apply(NetoyerUneChaine)
         df_clean['fonction'] = df_clean['fonction'].apply(NetoyerUneChaine)
         df_clean['societe'] = df_clean['societe'].apply(NetoyerUneChaine)
+        df_clean['location'] = df_clean['location'].apply(NetoyerUneChaine)
         df_clean['telephone'] = df_clean['telephone'].apply(NetoyerUnNumero)
         df_clean['email'] = df_clean['email'].apply(NettoyerUnEmail)
 
@@ -376,7 +381,8 @@ def StagingToProd(db: Session):
                     fonction=row.fonction,
                     societe=row.societe,
                     telephone=row.telephone,
-                    linkedin=row.linkedin
+                    linkedin=row.linkedin,
+                    location=row.location
                 ))
 
             else:
@@ -389,7 +395,8 @@ def StagingToProd(db: Session):
                         fonction=row.fonction,
                         societe=row.societe,
                         telephone=row.telephone,
-                        linkedin=row.linkedin
+                        linkedin=row.linkedin,
+                        location=row.location
                     ))
                     existing_emails.add(row.email)
 
