@@ -86,18 +86,27 @@ def AddAuto(db: Session, base: str):
     try:
         # Insérer les sociétés uniques à partir des emails
         result = db.execute(text(f"""
+            WITH source_societes AS (
+                SELECT DISTINCT ON (LOWER(TRIM(societe)))
+                    TRIM(societe) AS nom,
+                    LOWER(SPLIT_PART(SPLIT_PART(email, '@', 2), '.', 1)) AS domaine,
+                    LOWER(SPLIT_PART(SPLIT_PART(email, '@', 2), '.', -1)) AS extension
+                FROM {base}
+                WHERE email IS NOT NULL AND email != '' AND LOWER(email) != 'nan'
+                  AND societe IS NOT NULL AND societe != '' AND LOWER(societe) != 'nan'
+                ORDER BY LOWER(TRIM(societe)), id
+            )
             INSERT INTO societe_leads (nom, domaine, extension)
-            SELECT DISTINCT
-                TRIM(sl.societe) AS nom,
-                LOWER(SPLIT_PART(SPLIT_PART(sl.email, '@', 2), '.', 1)) AS domaine,
-                LOWER(SPLIT_PART(sl.email, '.', -1)) AS extension
-            FROM {base} sl
-            WHERE sl.email IS NOT NULL AND sl.email != '' AND LOWER(sl.email) != 'nan'
-              AND sl.societe IS NOT NULL AND sl.societe != '' AND LOWER(sl.societe) != 'nan'
-              AND NOT EXISTS (
+            SELECT
+                src.nom,
+                src.domaine,
+                src.extension
+            FROM source_societes src
+            WHERE NOT EXISTS (
                   SELECT 1 FROM societe_leads s 
-                  WHERE LOWER(s.nom) = LOWER(TRIM(sl.societe))
+                  WHERE LOWER(s.nom) = LOWER(src.nom)
               )
+            ON CONFLICT (nom) DO NOTHING
         """))
         
         db.commit()
