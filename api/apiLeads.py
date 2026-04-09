@@ -44,8 +44,8 @@ async def GetStagingImportHistory(userid: str | None = None, is_manager: bool = 
         return SP.GetAllStagingImportHistory(db, None if is_manager else userid)
 
 @router.get("/stat")
-async def GetAllClean(db:Session=Depends(get_db)):
-        return SP.GetAllStat(db)
+async def GetAllClean(userid: str | None = None, is_manager: bool = False, db:Session=Depends(get_db)):
+        return SP.GetAllStat(db, userid=userid, is_manager=is_manager)
 
 @router.get("/export/database-zip")
 async def export_database_zip(is_manager: bool = False, db: Session = Depends(get_db)):
@@ -142,8 +142,38 @@ async def complete_silver_email(payload = Body(...), db: Session = Depends(get_d
         if isinstance(added, dict) and "added_societes" in added:
             result["added_societes"] = int(added.get("added_societes", 0) or 0)
         return result
+    except HTTPException:
+        raise
     except Exception as e:
+        import traceback
+        print("ERREUR /silver/complete-email:", traceback.format_exc())
         raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/silver/email-collisions")
+async def preview_silver_email_collisions(
+    pattern: str | None = None,
+    overwrite: bool = True,
+    limit_emails: int = 50,
+    limit_leads_per_email: int = 20,
+    db: Session = Depends(get_db),
+):
+    result = PreviewEmailCollisions(
+        db,
+        "silver_leads",
+        pattern=pattern,
+        overwrite=overwrite,
+        limit_emails=limit_emails,
+        limit_leads_per_email=limit_leads_per_email,
+    )
+    try:
+        import json
+
+        print("JSON /silver/email-collisions:")
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    except Exception:
+        # Ne pas bloquer la réponse si l'affichage échoue
+        pass
+    return result
 
 @router.get("/settings/email-pattern")
 async def get_email_pattern(db: Session = Depends(get_db)):

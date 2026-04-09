@@ -34,8 +34,13 @@ def GetAllBlack(db:Session):
     return db.query(blacklistLeads).all()
 def GetAllClean(db:Session):
     return db.query(cleaningleads).all()
-def GetAllStat(db:Session):
-    return db.query(StatisticLeads).all()
+def GetAllStat(db: Session, userid: str | None = None, is_manager: bool = False):
+    q = db.query(StatisticLeads)
+    if not is_manager:
+        if not userid:
+            return []
+        q = q.filter(StatisticLeads.iduser == userid)
+    return q.order_by(StatisticLeads.created_at.desc()).all()
 def GetAllStaging(db:Session):
     return db.query(StagingLeads).all()
 def GetAllSteagingApplique(db: Session):

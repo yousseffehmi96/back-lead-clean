@@ -406,64 +406,112 @@ def CompleteEmail(db: Session,base:str, pattern: Optional[str] = None, overwrite
             '{extension}', SPLIT_PART(SPLIT_PART(sl.email, '@', 2), '.', -1))
         """
 
-        # Exécuter en une seule requête (CTE) pour:
-        # - éviter double comptage
-        # - éviter de retraiter une ligne déjà modifiée par u1 dans u2
+        # Exécuter en une seule requête (CTE) en résolvant les collisions (societe + fallback):
+        # - On construit tous les candidats d'email (2 sources)
+        # - On garde UNE seule ligne par email (score desc, source prioritaire, id asc)
+        # - On supprime les autres lignes en collision
+        # - On met à jour le gagnant si l'email n'existe pas déjà sur une autre ligne
+        filled_score = """
+            (
+                (CASE WHEN sl.nom IS NOT NULL AND sl.nom != '' AND sl.nom != 'nan' THEN 1 ELSE 0 END) +
+                (CASE WHEN sl.prenom IS NOT NULL AND sl.prenom != '' AND sl.prenom != 'nan' THEN 1 ELSE 0 END) +
+                (CASE WHEN sl.fonction IS NOT NULL AND sl.fonction != '' AND sl.fonction != 'nan' THEN 1 ELSE 0 END) +
+                (CASE WHEN sl.societe IS NOT NULL AND sl.societe != '' AND sl.societe != 'nan' THEN 1 ELSE 0 END) +
+                (CASE WHEN sl.telephone IS NOT NULL AND sl.telephone != '' AND sl.telephone != 'nan' THEN 1 ELSE 0 END) +
+                (CASE WHEN sl.linkedin IS NOT NULL AND sl.linkedin != '' AND sl.linkedin != 'nan' THEN 1 ELSE 0 END) +
+                (CASE WHEN sl.location IS NOT NULL AND sl.location != '' AND sl.location != 'nan' THEN 1 ELSE 0 END)
+            )
+        """
         count_row = db.execute(text(f"""
-            WITH u1 AS (
-                UPDATE {base} sl
-                SET email = {target_email_from_societe}
-                FROM societe_leads s
-                WHERE UPPER(sl.societe) = UPPER(s.nom)
-                  AND (
+            WITH candidates1 AS (
+                SELECT
+                    sl.id,
+                    {target_email_from_societe} AS new_email,
+                    {filled_score} AS score,
+                    1 AS source
+                FROM {base} sl
+                JOIN societe_leads s ON UPPER(sl.societe) = UPPER(s.nom)
+                WHERE (
                         :overwrite = TRUE
                         OR (sl.email IS NULL OR sl.email = '' OR sl.email = 'nan')
                   )
-                  AND NOT EXISTS (
-                        SELECT 1 FROM {base} x
-                        WHERE x.email = {target_email_from_societe}
-                          AND x.id <> sl.id
-                  )
-                  AND sl.nom IS NOT NULL 
-                  AND sl.nom != ''
-                  AND sl.nom != 'nan'
-                  AND sl.prenom IS NOT NULL 
-                  AND sl.prenom != ''
-                  AND sl.prenom != 'nan'
+                  AND sl.nom IS NOT NULL AND sl.nom != '' AND sl.nom != 'nan'
+                  AND sl.prenom IS NOT NULL AND sl.prenom != '' AND sl.prenom != 'nan'
                   AND s.domaine IS NOT NULL
                   AND s.extension IS NOT NULL
-                RETURNING sl.id
             ),
-            u2 AS (
-                UPDATE {base} sl
-                SET email = {target_email_from_existing}
+            candidates2 AS (
+                SELECT
+                    sl.id,
+                    {target_email_from_existing} AS new_email,
+                    {filled_score} AS score,
+                    2 AS source
+                FROM {base} sl
                 WHERE :overwrite = TRUE
-                  AND sl.id NOT IN (SELECT id FROM u1)
                   AND sl.email IS NOT NULL
                   AND sl.email != ''
                   AND LOWER(sl.email) != 'nan'
                   AND sl.email LIKE '%@%.%'
+                  AND sl.nom IS NOT NULL AND sl.nom != '' AND sl.nom != 'nan'
+                  AND sl.prenom IS NOT NULL AND sl.prenom != '' AND sl.prenom != 'nan'
+            ),
+            candidates AS (
+                SELECT * FROM candidates1
+                UNION ALL
+                SELECT * FROM candidates2
+            ),
+            candidates_clean AS (
+                SELECT *
+                FROM candidates
+                WHERE new_email IS NOT NULL AND new_email != '' AND LOWER(new_email) != 'nan'
+            ),
+            ranked AS (
+                SELECT
+                    id,
+                    new_email,
+                    score,
+                    source,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY new_email
+                        ORDER BY score DESC, source ASC, id ASC
+                    ) AS rn
+                FROM candidates_clean
+            ),
+            dupe_delete AS (
+                DELETE FROM {base} d
+                USING ranked r
+                WHERE d.id = r.id
+                  AND r.rn > 1
+                RETURNING d.id
+            ),
+            winners AS (
+                SELECT id, new_email
+                FROM ranked
+                WHERE rn = 1
+            ),
+            u AS (
+                UPDATE {base} sl
+                SET email = w.new_email
+                FROM winners w
+                WHERE sl.id = w.id
                   AND NOT EXISTS (
                         SELECT 1 FROM {base} x
-                        WHERE x.email = {target_email_from_existing}
+                        WHERE x.email = w.new_email
                           AND x.id <> sl.id
                   )
-                  AND sl.nom IS NOT NULL 
-                  AND sl.nom != ''
-                  AND sl.nom != 'nan'
-                  AND sl.prenom IS NOT NULL 
-                  AND sl.prenom != ''
-                  AND sl.prenom != 'nan'
                 RETURNING sl.id
             )
-            SELECT (SELECT COUNT(*) FROM u1) + (SELECT COUNT(*) FROM u2) AS emails_completed
+            SELECT
+                (SELECT COUNT(*) FROM u) AS emails_completed,
+                (SELECT COUNT(*) FROM dupe_delete) AS deleted_collisions
         """), {"pattern": pattern, "overwrite": overwrite}).mappings().first()
         
         db.commit()
         emails_completed = int((count_row or {}).get("emails_completed", 0) or 0)
+        deleted_collisions = int((count_row or {}).get("deleted_collisions", 0) or 0)
         
         print(f"✅ {emails_completed} emails complétés")
-        return {"emails_completed": emails_completed}
+        return {"emails_completed": emails_completed, "deleted_collisions": deleted_collisions}
 
     except HTTPException:
         raise
@@ -473,6 +521,174 @@ def CompleteEmail(db: Session,base:str, pattern: Optional[str] = None, overwrite
         if "UniqueViolation" in msg or "duplicate key" in msg or "unique constraint" in msg:
             raise HTTPException(status_code=409, detail="Email dupliqué: le pattern génère des collisions (même email pour plusieurs leads).")
         raise HTTPException(status_code=500, detail=f"Erreur base de données : {msg}")
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Erreur inattendue : {str(e)}")
+
+
+def PreviewEmailCollisions(
+    db: Session,
+    base: str,
+    pattern: Optional[str] = None,
+    overwrite: bool = True,
+    limit_emails: int = 50,
+    limit_leads_per_email: int = 20,
+):
+    """
+    Retourne les collisions internes du pattern: emails générés identiques pour plusieurs leads.
+    Utile pour diagnostiquer le 409 "duplicate email".
+    """
+    try:
+        from sqlalchemy import text
+
+        pattern = _normalize_email_pattern(pattern)
+        limit_emails = max(1, min(int(limit_emails or 50), 200))
+        limit_leads_per_email = max(1, min(int(limit_leads_per_email or 20), 200))
+
+        # mêmes expressions que CompleteEmail
+        target_email_from_societe = """
+            REPLACE(
+                REPLACE(
+                    REPLACE(
+                        REPLACE(:pattern, '{prenom}', LOWER(REGEXP_REPLACE(sl.prenom, '\\s+', '', 'g'))),
+                    '{nom}', LOWER(REGEXP_REPLACE(sl.nom, '\\s+', '', 'g'))),
+                '{domaine}', s.domaine),
+            '{extension}', s.extension)
+        """
+        target_email_from_existing = """
+            REPLACE(
+                REPLACE(
+                    REPLACE(
+                        REPLACE(:pattern, '{prenom}', LOWER(REGEXP_REPLACE(sl.prenom, '\\s+', '', 'g'))),
+                    '{nom}', LOWER(REGEXP_REPLACE(sl.nom, '\\s+', '', 'g'))),
+                '{domaine}', SPLIT_PART(SPLIT_PART(sl.email, '@', 2), '.', 1)),
+            '{extension}', SPLIT_PART(SPLIT_PART(sl.email, '@', 2), '.', -1))
+        """
+
+        rows = db.execute(
+            text(f"""
+                WITH candidates1 AS (
+                    SELECT
+                        sl.id,
+                        sl.nom,
+                        sl.prenom,
+                        sl.email AS current_email,
+                        sl.societe,
+                        {target_email_from_societe} AS new_email
+                    FROM {base} sl
+                    JOIN societe_leads s ON UPPER(sl.societe) = UPPER(s.nom)
+                    WHERE (
+                            :overwrite = TRUE
+                            OR (sl.email IS NULL OR sl.email = '' OR sl.email = 'nan')
+                      )
+                      AND sl.nom IS NOT NULL
+                      AND sl.nom != ''
+                      AND sl.nom != 'nan'
+                      AND sl.prenom IS NOT NULL
+                      AND sl.prenom != ''
+                      AND sl.prenom != 'nan'
+                      AND s.domaine IS NOT NULL
+                      AND s.extension IS NOT NULL
+                ),
+                candidates2 AS (
+                    SELECT
+                        sl.id,
+                        sl.nom,
+                        sl.prenom,
+                        sl.email AS current_email,
+                        sl.societe,
+                        {target_email_from_existing} AS new_email
+                    FROM {base} sl
+                    WHERE :overwrite = TRUE
+                      AND sl.email IS NOT NULL
+                      AND sl.email != ''
+                      AND LOWER(sl.email) != 'nan'
+                      AND sl.email LIKE '%@%.%'
+                      AND sl.nom IS NOT NULL
+                      AND sl.nom != ''
+                      AND sl.nom != 'nan'
+                      AND sl.prenom IS NOT NULL
+                      AND sl.prenom != ''
+                      AND sl.prenom != 'nan'
+                ),
+                candidates AS (
+                    -- on garde un set unique (au cas où une ligne est dans les deux)
+                    SELECT DISTINCT ON (id) *
+                    FROM (
+                        SELECT * FROM candidates1
+                        UNION ALL
+                        SELECT * FROM candidates2
+                    ) z
+                    WHERE new_email IS NOT NULL AND new_email != '' AND LOWER(new_email) != 'nan'
+                    ORDER BY id
+                ),
+                collisions AS (
+                    SELECT new_email, COUNT(*) AS cnt
+                    FROM candidates
+                    GROUP BY new_email
+                    HAVING COUNT(*) > 1
+                    ORDER BY cnt DESC, new_email
+                    LIMIT :limit_emails
+                ),
+                ranked AS (
+                    SELECT
+                        c.new_email,
+                        c.cnt,
+                        cand.id,
+                        cand.nom,
+                        cand.prenom,
+                        cand.current_email,
+                        cand.societe,
+                        ROW_NUMBER() OVER (PARTITION BY cand.new_email ORDER BY cand.id) AS rn
+                    FROM collisions c
+                    JOIN candidates cand ON cand.new_email = c.new_email
+                )
+                SELECT
+                    new_email,
+                    cnt,
+                    id,
+                    nom,
+                    prenom,
+                    current_email,
+                    societe
+                FROM ranked
+                WHERE rn <= :limit_leads_per_email
+                ORDER BY cnt DESC, new_email, id
+            """),
+            {
+                "pattern": pattern,
+                "overwrite": bool(overwrite),
+                "limit_emails": limit_emails,
+                "limit_leads_per_email": limit_leads_per_email,
+            },
+        ).mappings().all()
+
+        grouped: dict[str, dict] = {}
+        for r in rows:
+            email = r.get("new_email") or ""
+            if email not in grouped:
+                grouped[email] = {"email": email, "count": int(r.get("cnt") or 0), "leads": []}
+            grouped[email]["leads"].append(
+                {
+                    "id": r.get("id"),
+                    "nom": r.get("nom"),
+                    "prenom": r.get("prenom"),
+                    "current_email": r.get("current_email"),
+                    "societe": r.get("societe"),
+                }
+            )
+
+        return {
+            "pattern": pattern,
+            "overwrite": bool(overwrite),
+            "collisions": list(grouped.values()),
+        }
+
+    except HTTPException:
+        raise
+    except SQLAlchemyError as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Erreur base de données : {str(e)}")
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Erreur inattendue : {str(e)}")
