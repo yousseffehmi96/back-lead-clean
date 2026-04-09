@@ -850,6 +850,13 @@ def SaveStatic(db: Session,static:Static):
 def updatestat(db: Session, result: dict):
     print("lena")
 
+    # Compat rétro: ajouter colonne si absente
+    try:
+        db.execute(text("ALTER TABLE statistic_leads ADD COLUMN IF NOT EXISTS staging_vs_applique INTEGER"))
+        db.commit()
+    except Exception:
+        db.rollback()
+
     query = text("""
         UPDATE statistic_leads
         SET 
@@ -864,6 +871,7 @@ def updatestat(db: Session, result: dict):
             total_deleted       = :total_deleted,
             staging_vs_silver   = :staging_vs_silver,
             staging_vs_gold     = :staging_vs_gold,
+            staging_vs_applique = :staging_vs_applique,
             staging_internal    = :staging_internal,
 
             blacklisted_removed = :blacklisted_removed
@@ -883,6 +891,7 @@ def updatestat(db: Session, result: dict):
         "total_deleted": result.get("total_deleted", 0),
         "staging_vs_silver": result.get("staging_vs_silver", 0),
         "staging_vs_gold": result.get("staging_vs_gold", 0),
+        "staging_vs_applique": result.get("staging_vs_applique", 0),
         "staging_internal": result.get("staging_internal", 0),
 
         "blacklisted_removed": result.get("blacklisted_removed", 0),

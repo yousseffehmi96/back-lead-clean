@@ -21,6 +21,7 @@ class StatisticLeads(Base):
 
     staging_vs_silver = Column(Integer)
     staging_vs_gold = Column(Integer)
+    staging_vs_applique = Column(Integer)
     staging_internal = Column(Integer)
 
     total_deleted = Column(Integer)
