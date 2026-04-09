@@ -1,8 +1,11 @@
 from fastapi import UploadFile, HTTPException
 import pandas as pd
 from sqlalchemy.orm import Session
-from sqlalchemy import text
+from sqlalchemy import text, bindparam
+from sqlalchemy.dialects.postgresql import ARRAY
+from sqlalchemy import Text
 from sqlalchemy.exc import SQLAlchemyError
+from typing import Optional
 from model.staging_leads import StagingLeads
 from model.blacklistLeads import blacklistLeads
 from model.cleaning_leads import cleaningleads
@@ -15,12 +18,43 @@ import unicodedata
 import openpyxl
 import io
 
+def ensure_app_settings_table(db: Session):
+    db.execute(text("""
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """))
+    db.commit()
+
+def GetEmailPattern(db: Session) -> str:
+    ensure_app_settings_table(db)
+    row = db.execute(text("SELECT value FROM app_settings WHERE key = 'email_pattern'")).fetchone()
+    if row and row[0]:
+        return str(row[0])
+    return "{prenom}.{nom}@{domaine}.{extension}"
+
+def SaveEmailPattern(db: Session, pattern: str, is_manager: bool):
+    if not is_manager:
+        raise HTTPException(status_code=403, detail="Accès refusé: manager seulement")
+    ensure_app_settings_table(db)
+    normalized = _normalize_email_pattern(pattern)
+    db.execute(text("""
+        INSERT INTO app_settings(key, value, updated_at)
+        VALUES ('email_pattern', :val, CURRENT_TIMESTAMP)
+        ON CONFLICT (key)
+        DO UPDATE SET value = EXCLUDED.value, updated_at = CURRENT_TIMESTAMP
+    """), {"val": normalized})
+    db.commit()
+    return {"message": "Pattern enregistré", "pattern": normalized}
+
 
 def normalize_col(col: str) -> str:
     result = unicodedata.normalize('NFKD', str(col)).encode('ascii', 'ignore').decode('ascii').strip().lower()
     result = result.replace("'", " ").replace("'", " ").replace("`", " ")
     return result
-def LoadFileToBd(file: UploadFile, db: Session):
+def LoadFileToBd(file: UploadFile, db: Session, userid: Optional[str] = None, username: Optional[str] = None):
     COLUMN_ALIASES = {
         "Nom":       ["nom", "last name", "lastname", "last_name", "surname", "nom du contact"],
         "Prenom":    ["prenom", "first name", "firstname", "first_name", "name", "prenom du contact"],
@@ -40,21 +74,21 @@ def LoadFileToBd(file: UploadFile, db: Session):
         if file.filename.endswith(".csv"):
             raw = file.file.read()
             try:
-                text = raw.decode("utf-8")
+                decoded_text = raw.decode("utf-8")
             except UnicodeDecodeError:
-                text = raw.decode("latin1")
+                decoded_text = raw.decode("latin1")
  
             sep = ","
             for delimiter in [",", ";", "\t", "|"]:
                 try:
-                    test_df = pd.read_csv(io.StringIO(text), sep=delimiter, nrows=5, dtype=str)
+                    test_df = pd.read_csv(io.StringIO(decoded_text), sep=delimiter, nrows=5, dtype=str)
                     if len(test_df.columns) > 2:
                         sep = delimiter
                         break
                 except:
                     continue
  
-            df = pd.read_csv(io.StringIO(text), sep=sep, engine="python", dtype=str)
+            df = pd.read_csv(io.StringIO(decoded_text), sep=sep, engine="python", dtype=str)
  
         # 📊 Excel
         elif file.filename.endswith((".xlsx", ".xls")):
@@ -71,12 +105,22 @@ def LoadFileToBd(file: UploadFile, db: Session):
         print("Colonnes normalisées:", df.columns.tolist())
  
         # 🔄 Mapping colonnes
+        # Priorité: on prend le 1er alias trouvé selon l'ordre défini dans COLUMN_ALIASES.
+        # Ex: si "prenom" et "first name" existent ensemble, "prenom" est gardé.
         rename_map = {}
-        for standard_name, aliases in COLUMN_ALIASES.items():
-            for col in df.columns:
-                if col.strip() in aliases and standard_name not in rename_map.values():
-                    rename_map[col] = standard_name
+        normalized_aliases = {
+            standard_name: [normalize_col(alias).strip() for alias in aliases]
+            for standard_name, aliases in COLUMN_ALIASES.items()
+        }
+
+        for standard_name, aliases in normalized_aliases.items():
+            matched_col = None
+            for alias in aliases:
+                if alias in df.columns:
+                    matched_col = alias
                     break
+            if matched_col:
+                rename_map[matched_col] = standard_name
  
         df.rename(columns=rename_map, inplace=True)
         print(f"📋 Colonnes après rename: {df.columns.tolist()}")
@@ -124,10 +168,52 @@ def LoadFileToBd(file: UploadFile, db: Session):
 
         print("✅ Nettoyage terminé")
 
+        # ✅ Check "déjà traité" basé sur Historique des imports (staging_import_history)
+        # On compare le contenu (principalement emails) AVANT d'insérer en staging/history.
+        if userid:
+            unique_emails = sorted({(e or "").strip().lower() for e in df_clean["email"].tolist() if e and str(e).strip().lower() not in ("", "nan")})
+            if unique_emails:
+                q = text("""
+                    SELECT COUNT(DISTINCT LOWER(TRIM(email)))
+                    FROM staging_import_history
+                    WHERE iduser = :userid
+                      AND LOWER(TRIM(email)) = ANY(:emails)
+                """).bindparams(bindparam("emails", type_=ARRAY(Text)))
+                existing = db.execute(q, {"userid": str(userid), "emails": unique_emails}).scalar() or 0
+                existing = int(existing)
+                # si (quasi) tous les emails sont déjà dans l'historique, considérer le fichier déjà traité
+                if existing >= max(1, int(0.95 * len(unique_emails))):
+                    return {
+                        "inserted_rows": 0,
+                        "duplicate_file_processed": True,
+                        "already_processed_in_history": existing,
+                        "message": "Tu as deja traite ce fichier"
+                    }
+
         # 🚀 Insertion ultra-rapide
         engine = db.get_bind()
         df_clean.to_sql(
             name='staging_leads',
+            con=engine,
+            if_exists='append',
+            index=False,
+            method='multi',
+            chunksize=1000
+        )
+
+        # Historiser chaque import pour garder la trace des leads importes
+        # Ajout optionnel des infos utilisateur (utile pour export manager)
+        db.execute(text("ALTER TABLE staging_import_history ADD COLUMN IF NOT EXISTS username TEXT"))
+        db.commit()
+        history_df = df_clean.copy()
+        history_df["filename"] = file.filename
+        history_df["iduser"] = userid
+        history_df["username"] = username
+        history_df = history_df[
+            ["filename", "iduser", "username", "nom", "prenom", "email", "fonction", "societe", "telephone", "linkedin", "location"]
+        ]
+        history_df.to_sql(
+            name='staging_import_history',
             con=engine,
             if_exists='append',
             index=False,
@@ -219,6 +305,24 @@ def SupprimerDoublons(db: Session):
         total_deleted += staging_vs_gold
         print(f"✅ STAGING vs GOLD: {staging_vs_gold} doublons supprimés")
 
+        query_staging_applique = text("""
+            DELETE FROM staging_leads
+            WHERE id IN (
+                SELECT s.id
+                FROM staging_leads s
+                INNER JOIN steaging_applique sa ON
+                    COALESCE(s.email, '') = COALESCE(sa.email, '') AND
+                    COALESCE(s.nom, '') = COALESCE(sa.nom, '') AND
+                    COALESCE(s.prenom, '') = COALESCE(sa.prenom, '')
+                WHERE s.email IS NOT NULL AND s.email != ''
+            )
+        """)
+        res3 = db.execute(query_staging_applique)
+        staging_vs_applique = res3.rowcount if hasattr(res3, "rowcount") else 0
+        results["staging_vs_applique"] = staging_vs_applique
+        total_deleted += staging_vs_applique
+        print(f"✅ STAGING vs STEAGING_APPLIQUE: {staging_vs_applique} doublons supprimés")
+
 
         # 4️⃣ Supprimer doublons dans STAGING lui-même
         query_staging_internal = text("""
@@ -247,6 +351,7 @@ def SupprimerDoublons(db: Session):
             "total_deleted": total_deleted,
             "staging_vs_silver": staging_vs_silver,
             "staging_vs_gold": staging_vs_gold,
+            "staging_vs_applique": staging_vs_applique,
             "staging_internal": staging_internal
         }
 
@@ -258,35 +363,104 @@ def SupprimerDoublons(db: Session):
         raise HTTPException(status_code=500, detail=f"Erreur inattendue : {str(e)}")
 
 
-def CompleteEmail(db: Session,base:str):
+def _normalize_email_pattern(pattern: Optional[str]) -> str:
+    # Tokens supportés: {prenom} {nom} {domaine} {extension}
+    default_pattern = "{prenom}.{nom}@{domaine}.{extension}"
+    if not pattern:
+        return default_pattern
+    p = str(pattern).strip()
+    if not p:
+        return default_pattern
+    if len(p) > 200:
+        raise HTTPException(status_code=400, detail="Pattern email trop long")
+    required = ["{prenom}", "{nom}", "{domaine}", "{extension}"]
+    if any(tok not in p for tok in required):
+        raise HTTPException(status_code=400, detail="Pattern invalide. Tokens requis: {prenom} {nom} {domaine} {extension}")
+    if "@" not in p:
+        raise HTTPException(status_code=400, detail="Pattern invalide: '@' manquant")
+    return p
+
+def CompleteEmail(db: Session,base:str, pattern: Optional[str] = None, overwrite: bool = False):
     print("🔄 Début de complétion des emails...")
     try:
         from sqlalchemy import text
-        
-        # Vérifier qu'il y a des sociétés
-        count_societes = db.query(societeleads).count()
-        if count_societes == 0:
-            raise HTTPException(status_code=404, detail="Aucune société trouvée en base.")
+        pattern = _normalize_email_pattern(pattern)
 
-        # UPDATE avec JOIN - UNIQUEMENT si email est NULL ou vide
-        result = db.execute(text(f"""
-            UPDATE {base} sl
-            SET email = CONCAT(sl.prenom, '.', sl.nom, '@', s.domaine, '.', s.extension)
-            FROM societe_leads s
-            WHERE UPPER(sl.societe) = UPPER(s.nom)
-              AND (sl.email IS NULL OR sl.email = '' OR sl.email = 'nan')
-              AND sl.nom IS NOT NULL 
-              AND sl.nom != ''
-              AND sl.nom != 'nan'
-              AND sl.prenom IS NOT NULL 
-              AND sl.prenom != ''
-              AND sl.prenom != 'nan'
-              AND s.domaine IS NOT NULL
-              AND s.extension IS NOT NULL
-        """))
+        # Expression SQL pour l'email cible (utilisée aussi dans NOT EXISTS anti-doublon)
+        target_email_from_societe = """
+            REPLACE(
+                REPLACE(
+                    REPLACE(
+                        REPLACE(:pattern, '{prenom}', LOWER(REGEXP_REPLACE(sl.prenom, '\\s+', '', 'g'))),
+                    '{nom}', LOWER(REGEXP_REPLACE(sl.nom, '\\s+', '', 'g'))),
+                '{domaine}', s.domaine),
+            '{extension}', s.extension)
+        """
+        target_email_from_existing = """
+            REPLACE(
+                REPLACE(
+                    REPLACE(
+                        REPLACE(:pattern, '{prenom}', LOWER(REGEXP_REPLACE(sl.prenom, '\\s+', '', 'g'))),
+                    '{nom}', LOWER(REGEXP_REPLACE(sl.nom, '\\s+', '', 'g'))),
+                '{domaine}', SPLIT_PART(SPLIT_PART(sl.email, '@', 2), '.', 1)),
+            '{extension}', SPLIT_PART(SPLIT_PART(sl.email, '@', 2), '.', -1))
+        """
+
+        # Exécuter en une seule requête (CTE) pour:
+        # - éviter double comptage
+        # - éviter de retraiter une ligne déjà modifiée par u1 dans u2
+        count_row = db.execute(text(f"""
+            WITH u1 AS (
+                UPDATE {base} sl
+                SET email = {target_email_from_societe}
+                FROM societe_leads s
+                WHERE UPPER(sl.societe) = UPPER(s.nom)
+                  AND (
+                        :overwrite = TRUE
+                        OR (sl.email IS NULL OR sl.email = '' OR sl.email = 'nan')
+                  )
+                  AND NOT EXISTS (
+                        SELECT 1 FROM {base} x
+                        WHERE x.email = {target_email_from_societe}
+                          AND x.id <> sl.id
+                  )
+                  AND sl.nom IS NOT NULL 
+                  AND sl.nom != ''
+                  AND sl.nom != 'nan'
+                  AND sl.prenom IS NOT NULL 
+                  AND sl.prenom != ''
+                  AND sl.prenom != 'nan'
+                  AND s.domaine IS NOT NULL
+                  AND s.extension IS NOT NULL
+                RETURNING sl.id
+            ),
+            u2 AS (
+                UPDATE {base} sl
+                SET email = {target_email_from_existing}
+                WHERE :overwrite = TRUE
+                  AND sl.id NOT IN (SELECT id FROM u1)
+                  AND sl.email IS NOT NULL
+                  AND sl.email != ''
+                  AND LOWER(sl.email) != 'nan'
+                  AND sl.email LIKE '%@%.%'
+                  AND NOT EXISTS (
+                        SELECT 1 FROM {base} x
+                        WHERE x.email = {target_email_from_existing}
+                          AND x.id <> sl.id
+                  )
+                  AND sl.nom IS NOT NULL 
+                  AND sl.nom != ''
+                  AND sl.nom != 'nan'
+                  AND sl.prenom IS NOT NULL 
+                  AND sl.prenom != ''
+                  AND sl.prenom != 'nan'
+                RETURNING sl.id
+            )
+            SELECT (SELECT COUNT(*) FROM u1) + (SELECT COUNT(*) FROM u2) AS emails_completed
+        """), {"pattern": pattern, "overwrite": overwrite}).mappings().first()
         
         db.commit()
-        emails_completed = result.rowcount
+        emails_completed = int((count_row or {}).get("emails_completed", 0) or 0)
         
         print(f"✅ {emails_completed} emails complétés")
         return {"emails_completed": emails_completed}
@@ -295,7 +469,10 @@ def CompleteEmail(db: Session,base:str):
         raise
     except SQLAlchemyError as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Erreur base de données : {str(e)}")
+        msg = str(e)
+        if "UniqueViolation" in msg or "duplicate key" in msg or "unique constraint" in msg:
+            raise HTTPException(status_code=409, detail="Email dupliqué: le pattern génère des collisions (même email pour plusieurs leads).")
+        raise HTTPException(status_code=500, detail=f"Erreur base de données : {msg}")
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Erreur inattendue : {str(e)}")
@@ -500,3 +677,42 @@ def updatestat(db: Session, result: dict):
     db.commit()
 
 
+def rollback_duplicate_upload_records(db: Session, filename: str, iduser: str, inserted_rows: int):
+    try:
+        if not filename or not iduser or inserted_rows <= 0:
+            return {"rolled_back_history": 0, "rolled_back_stats": 0}
+
+        # Supprimer la dernière ligne statistique liée à cet import utilisateur/fichier
+        stats_deleted = db.execute(text("""
+            DELETE FROM statistic_leads
+            WHERE id IN (
+                SELECT id
+                FROM statistic_leads
+                WHERE filename = :filename
+                  AND iduser = :iduser
+                ORDER BY id DESC
+                LIMIT 1
+            )
+        """), {"filename": filename, "iduser": iduser}).rowcount
+
+        # Supprimer les N dernières lignes d'historique liées à cet import
+        history_deleted = db.execute(text("""
+            DELETE FROM staging_import_history
+            WHERE id IN (
+                SELECT id
+                FROM staging_import_history
+                WHERE filename = :filename
+                  AND iduser = :iduser
+                ORDER BY id DESC
+                LIMIT :lim
+            )
+        """), {"filename": filename, "iduser": iduser, "lim": inserted_rows}).rowcount
+
+        db.commit()
+        return {"rolled_back_history": history_deleted, "rolled_back_stats": stats_deleted}
+    except SQLAlchemyError as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Erreur rollback import doublon : {str(e)}")
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Erreur inattendue rollback import doublon : {str(e)}")

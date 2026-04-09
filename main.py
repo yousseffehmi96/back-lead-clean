@@ -3,9 +3,12 @@ from api.api import Router as api_router
 from api.apiSociete import routes as societe_router
 from api.apiLeads import router as Leads_router
 from api.apiToken import Route as Token_router
+from model.staging_import_history import StagingImportHistory
+from model.steaging_applique import SteagingApplique
 from fastapi.middleware.cors import CORSMiddleware
 from database.db import engine, Base
 from api.apiValidationRules import routes as validation_rules_router
+from service.serviceLeads import Rephrase
 app=FastAPI()
 Base.metadata.create_all(bind=engine)
 app.include_router(api_router)
@@ -26,5 +29,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 
