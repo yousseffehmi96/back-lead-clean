@@ -81,6 +81,18 @@ async def StagingDispatch(base:str,payload = Body(...), db: Session = Depends(ge
         r3 = CheckContactsBlack(db,base)
         result.update(r3)
 
+        # Total supprimé = doublons (silver/gold/applique/interne) + blacklistés retirés
+        try:
+            result["total_deleted"] = (
+                int(result.get("staging_vs_silver", 0) or 0)
+                + int(result.get("staging_vs_gold", 0) or 0)
+                + int(result.get("staging_vs_applique", 0) or 0)
+                + int(result.get("staging_internal", 0) or 0)
+                + int(result.get("blacklisted_removed", 0) or 0)
+            )
+        except Exception:
+            pass
+
         db.expire_all()
 
         r6 = SP.StagingToGold(db,base)

@@ -714,7 +714,7 @@ def CheckContactsBlack(db: Session, base: str):
         db.commit()
         deleted_count = res.rowcount if hasattr(res, "rowcount") else 0
         print(f"✅ {deleted_count} leads blacklistés supprimés de {base}")
-        return {"blacklisted_removed": deleted_count}  # ✅ Retourner un dict
+        return {"blacklisted_removed": deleted_count}
         
     except SQLAlchemyError as e:
         db.rollback()
