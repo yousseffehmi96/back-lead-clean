@@ -33,9 +33,25 @@ def ToBlack(id:int,eliminer:str=Body(...),db: Session = Depends(get_db)):
 @router.get("/clean")
 async def GetAllClean(db:Session=Depends(get_db)):
         return SP.GetAllClean(db)
+
+@router.post("/clean/delete")
+async def DeleteClean(payload = Body(...), db: Session = Depends(get_db)):
+        ids = []
+        if isinstance(payload, dict):
+                ids = payload.get("ids") or []
+        return SP.DeleteCleanByIds(db, ids=ids)
 @router.get("/steaging-applique")
 async def GetAllSteagingApplique(db: Session = Depends(get_db)):
         return SP.GetAllSteagingApplique(db)
+
+@router.post("/steaging-applique/to-silver")
+async def SteagingAppliqueToSilver(payload = Body(...), db: Session = Depends(get_db)):
+        ids = []
+        pattern = None
+        if isinstance(payload, dict):
+                ids = payload.get("ids") or []
+                pattern = payload.get("pattern")
+        return SP.SteagingAppliqueToSilver(db, ids=ids, pattern=pattern)
 
 @router.get("/staging-import-history")
 async def GetStagingImportHistory(userid: str | None = None, is_manager: bool = False, db: Session = Depends(get_db)):

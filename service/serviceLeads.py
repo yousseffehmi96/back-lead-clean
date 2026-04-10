@@ -26,6 +26,185 @@ from service import service as se
 from database.db import get_db
 import unicodedata
 from util.util import NettoyerUnEmail
+import re
+
+def _norm_company_key(v: str | None) -> str:
+    if not v:
+        return ""
+    s = str(v).strip().lower()
+    # enlever accents
+    s = unicodedata.normalize("NFD", s)
+    s = "".join(ch for ch in s if unicodedata.category(ch) != "Mn")
+    # garder alphanum seulement
+    s = re.sub(r"[^a-z0-9]+", "", s)
+    return s
+
+def _norm_name_part(v: str | None) -> str:
+    if not v:
+        return ""
+    s = str(v).strip().lower()
+    s = unicodedata.normalize("NFD", s)
+    s = "".join(ch for ch in s if unicodedata.category(ch) != "Mn")
+    s = re.sub(r"[^a-z0-9]+", "", s)
+    return s
+
+def _build_email(pattern: str, prenom: str, nom: str, domaine: str, extension: str) -> str:
+    p = pattern or "{prenom}.{nom}@{domaine}.{extension}"
+    return (
+        p.replace("{prenom}", prenom)
+         .replace("{nom}", nom)
+         .replace("{domaine}", domaine)
+         .replace("{extension}", extension)
+    )
+
+def SteagingAppliqueToSilver(db: Session, ids: list[int], pattern: str | None = None):
+    """
+    Déplace une sélection de steaging_applique vers silver_leads.
+    Conditions:
+    - société existe dans societe_leads (match par nom "normalisé")
+    - on génère l'email si manquant (pattern + domaine/ext de la société)
+    - on n'insère pas si email vide ou déjà existant (unique) dans silver_leads
+    """
+    if not ids:
+        return {"moved_to_silver": 0, "skipped": 0, "details": []}
+
+    try:
+        # pattern depuis app_settings si non fourni
+        if not pattern:
+            try:
+                pattern = se.GetEmailPattern(db)
+            except Exception:
+                pattern = "{prenom}.{nom}@{domaine}.{extension}"
+
+        # map des sociétés (nom normalisé -> (domaine, extension))
+        companies = db.query(societeleads.nom, societeleads.domaine, societeleads.extension).all()
+        company_map: dict[str, tuple[str, str]] = {}
+        for nom_c, dom, ext in companies:
+            k = _norm_company_key(nom_c)
+            if not k:
+                continue
+            company_map[k] = (str(dom or "").strip().lower(), str(ext or "").strip().lower())
+
+        leads = db.query(SteagingApplique).filter(SteagingApplique.id.in_(ids)).all()
+        moved = 0
+        skipped = 0
+        deleted_already_in_silver = 0
+        details: list[dict] = []
+        moved_ids: list[int] = []
+        deleted_ids: list[int] = []
+
+        deleted_duplicates = 0
+
+        def _delete_duplicates_for(lid: int, email_val: str, nom_val: str | None, prenom_val: str | None, societe_val: str | None):
+            nonlocal deleted_duplicates
+            try:
+                # Priorité email si présent
+                e = (email_val or "").strip().lower()
+                if e and e not in ("nan", "none", "null"):
+                    res = db.execute(text("""
+                        DELETE FROM steaging_applique
+                        WHERE id <> :id
+                          AND LOWER(TRIM(COALESCE(email,''))) = :email
+                    """), {"id": lid, "email": e})
+                    deleted_duplicates += int(res.rowcount or 0)
+                    return
+                # Sinon nom+prenom+societe
+                n = _norm_name_part(nom_val)
+                p = _norm_name_part(prenom_val)
+                s = _norm_company_key(societe_val)
+                if not n or not p or not s:
+                    return
+                rows = db.execute(text("""
+                    SELECT id, nom, prenom, societe
+                    FROM steaging_applique
+                    WHERE id <> :id
+                """), {"id": lid}).mappings().all()
+                to_delete = []
+                for r in rows:
+                    if _norm_name_part(r.get("nom")) == n and _norm_name_part(r.get("prenom")) == p and _norm_company_key(r.get("societe")) == s:
+                        to_delete.append(r.get("id"))
+                if to_delete:
+                    res = db.execute(text("DELETE FROM steaging_applique WHERE id = ANY(:ids)"), {"ids": to_delete})
+                    deleted_duplicates += int(res.rowcount or 0)
+            except Exception:
+                return
+
+        for l in leads:
+            try:
+                soc_key = _norm_company_key(l.societe)
+                if not soc_key or soc_key not in company_map:
+                    skipped += 1
+                    details.append({"id": l.id, "reason": "societe_not_found"})
+                    continue
+
+                dom, ext = company_map[soc_key]
+                if not dom or not ext:
+                    skipped += 1
+                    details.append({"id": l.id, "reason": "societe_domain_missing"})
+                    continue
+
+                email = (l.email or "").strip()
+                if not email or email.lower() in ("nan", "none", "null"):
+                    prenom = _norm_name_part(l.prenom)
+                    nom = _norm_name_part(l.nom)
+                    if not prenom or not nom:
+                        skipped += 1
+                        details.append({"id": l.id, "reason": "name_missing"})
+                        continue
+                    email = _build_email(pattern, prenom, nom, dom, ext).strip().lower()
+                    email = NettoyerUnEmail(email) or email
+
+                if not email or "@" not in email or "{" in email:
+                    skipped += 1
+                    details.append({"id": l.id, "reason": "email_invalid"})
+                    continue
+
+                # unique constraint: skip si existe déjà
+                exists = db.query(Silver_leads.id).filter(Silver_leads.email == email).first()
+                if exists:
+                    # L'utilisateur veut que ce lead disparaisse de steaging_applique
+                    db.delete(l)
+                    deleted_already_in_silver += 1
+                    deleted_ids.append(int(l.id))
+                    _delete_duplicates_for(l.id, email, l.nom, l.prenom, l.societe)
+                    details.append({"id": l.id, "reason": "deleted_already_in_silver"})
+                    continue
+
+                obj = Silver_leads(
+                    email=email,
+                    nom=l.nom,
+                    prenom=l.prenom,
+                    fonction=l.fonction,
+                    societe=l.societe,
+                    telephone=l.telephone,
+                    linkedin=l.linkedin,
+                    location=l.location,
+                )
+                db.add(obj)
+                db.delete(l)
+                moved += 1
+                moved_ids.append(int(l.id))
+                _delete_duplicates_for(l.id, email, l.nom, l.prenom, l.societe)
+            except Exception:
+                skipped += 1
+                details.append({"id": getattr(l, "id", None), "reason": "error"})
+
+        db.commit()
+        return {
+            "moved_to_silver": moved,
+            "moved_ids": moved_ids,
+            "deleted_already_in_silver": deleted_already_in_silver,
+            "deleted_ids": deleted_ids,
+            "deleted_duplicates": deleted_duplicates,
+            "skipped": skipped,
+            "details": details,
+        }
+    except SQLAlchemyError as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Erreur base de données : {str(e)}")
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Erreur inattendue : {str(e)}")
 def GetAllSilver(db:Session):
     return db.query(Silver_leads).all()
 def GetAllGold(db:Session):
@@ -34,6 +213,20 @@ def GetAllBlack(db:Session):
     return db.query(blacklistLeads).all()
 def GetAllClean(db:Session):
     return db.query(cleaningleads).all()
+
+def DeleteCleanByIds(db: Session, ids: list[int]):
+    if not ids:
+        return {"deleted": 0}
+    try:
+        res = db.execute(text("DELETE FROM cleaning_leads WHERE id = ANY(:ids)"), {"ids": ids})
+        db.commit()
+        return {"deleted": int(res.rowcount or 0)}
+    except SQLAlchemyError as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Erreur base de données : {str(e)}")
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Erreur inattendue : {str(e)}")
 def GetAllStat(db: Session, userid: str | None = None, is_manager: bool = False):
     q = db.query(StatisticLeads)
     if not is_manager:
