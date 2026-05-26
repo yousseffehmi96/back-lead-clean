@@ -16,6 +16,7 @@ class Gold_leads(Base):
     telephone = Column(String(50))
     linkedin = Column(Text)
     location = Column(Text)
+    statu = Column(String(50))
 
     created_at = Column(
         TIMESTAMP,

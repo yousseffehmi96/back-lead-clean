@@ -230,3 +230,21 @@ async def update_silver_email(id: int, payload = Body(...), db: Session = Depend
 @router.get("/teste/lead")
 def faire(db:Session = Depends(get_db)):
     SP.Rephrase(db,"staging_leads")
+
+
+@router.get("/send/{email}")
+def send_get(email: str, db: Session = Depends(get_db)):
+    return SP.send_and_check(email, db)
+
+@router.post("/send/bulk")
+def send_bulk(emails: list[str] = Body(...), db: Session = Depends(get_db)):
+    results = []
+    for email in emails:
+        result = SP.send_and_check(email, db)
+        results.append(result)
+    return results
+
+
+@router.get('/location/{base}')
+def location(base: str, db: Session = Depends(get_db)):
+    return SP.Rephrase(db, base)
