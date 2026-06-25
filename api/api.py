@@ -1,4 +1,4 @@
-from fastapi import Form,UploadFile,File,APIRouter,Depends
+from fastapi import Form,UploadFile,File,APIRouter,Depends,Body
 from service.service import *
 from database.db import get_db
 import service.serviceLeads as sp
@@ -41,7 +41,45 @@ async def Upload(userid: str = Form(...), username: str | None = Form(None), fil
     except Exception:
         pass
     return stats
-        
+
+
+@Router.post("/upload-mapped")
+async def UploadMapped(payload=Body(...), db: Session = Depends(get_db)):
+    """Insère des lignes déjà mappées côté front (mapping manuel des colonnes)
+    dans staging_leads, exactement comme /upload le fait pour un fichier."""
+    rows = payload.get("rows") or []
+    userid = str(payload.get("userid") or "")
+    username = payload.get("username")
+    filename = payload.get("filename") or "import-mappe"
+
+    stats = {}
+    stats["filename"] = filename
+    stats["iduser"] = userid
+    stats.update(LoadRowsToBd(rows, db, userid, username, filename))
+    if stats.get("duplicate_file_processed"):
+        return stats
+    nettoyer_contact(db)
+    stats.setdefault("emails_completed", 0)
+    stats.setdefault("blacklisted_removed", 0)
+    stats.setdefault("moved_to_silver", 0)
+    stats.setdefault("moved_to_gold", 0)
+    stats.setdefault("moved_to_clean", 0)
+    stats.setdefault("staging_vs_silver", 0)
+    stats.setdefault("staging_vs_gold", 0)
+    stats.setdefault("staging_internal", 0)
+    static = Static(**stats)
+    SaveStatic(db, static)
+    try:
+        inserted_rows = int(stats.get("inserted_rows", 0) or 0)
+        already_processed = sp.CountLastImportAlreadyProcessedInApplique(db, filename, userid, inserted_rows)
+        stats["already_processed_in_applique"] = already_processed
+        if inserted_rows > 0 and already_processed == inserted_rows:
+            stats["duplicate_file_processed"] = True
+            stats["message"] = "Tu as deja traite ce fichier"
+    except Exception:
+        pass
+    return stats
+
 
 
 @Router.get("/staging")

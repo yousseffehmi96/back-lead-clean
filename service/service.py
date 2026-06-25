@@ -233,6 +233,98 @@ def LoadFileToBd(file: UploadFile, db: Session, userid: Optional[str] = None, us
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Erreur : {str(e)}")
+
+
+def LoadRowsToBd(rows, db: Session, userid: Optional[str] = None, username: Optional[str] = None, filename: Optional[str] = None):
+    """Insère des lignes déjà mappées (liste de dicts) dans staging_leads + historique.
+
+    Même logique de nettoyage / déduplication que LoadFileToBd, mais à partir de
+    données JSON envoyées par le front (mapping manuel des colonnes)."""
+    LEAD_COLS = ["nom", "prenom", "email", "fonction", "societe", "telephone", "linkedin", "location"]
+    try:
+        if not rows:
+            return {"inserted_rows": 0, "message": "Aucune ligne reçue"}
+
+        df_clean = pd.DataFrame(rows)
+        # Garantir la présence de toutes les colonnes attendues
+        for col in LEAD_COLS:
+            if col not in df_clean.columns:
+                df_clean[col] = None
+        df_clean = df_clean[LEAD_COLS].copy().astype(object)
+
+        # Nettoyage identique à l'import fichier
+        df_clean['nom'] = df_clean['nom'].apply(NetoyerUneChaine)
+        df_clean['prenom'] = df_clean['prenom'].apply(NetoyerUneChaine)
+        df_clean['fonction'] = df_clean['fonction'].apply(NetoyerUneChaine)
+        df_clean['societe'] = df_clean['societe'].apply(NetoyerUneChaine)
+        df_clean['location'] = df_clean['location'].apply(NetoyerUneChaine)
+        df_clean['telephone'] = df_clean['telephone'].apply(NetoyerUnNumero)
+        df_clean['email'] = df_clean['email'].apply(NettoyerUnEmail)
+
+        # Supprime les lignes entièrement vides
+        df_clean = df_clean[df_clean.apply(lambda r: any(str(v or "").strip() for v in r), axis=1)]
+        if df_clean.empty:
+            return {"inserted_rows": 0, "message": "Aucune ligne valide après nettoyage"}
+
+        # Déjà traité ? (basé sur l'historique des emails de l'utilisateur)
+        if userid:
+            unique_emails = sorted({(e or "").strip().lower() for e in df_clean["email"].tolist() if e and str(e).strip().lower() not in ("", "nan")})
+            if unique_emails:
+                q = text("""
+                    SELECT COUNT(DISTINCT LOWER(TRIM(email)))
+                    FROM staging_import_history
+                    WHERE iduser = :userid
+                      AND LOWER(TRIM(email)) = ANY(:emails)
+                """).bindparams(bindparam("emails", type_=ARRAY(Text)))
+                existing = db.execute(q, {"userid": str(userid), "emails": unique_emails}).scalar() or 0
+                existing = int(existing)
+                if existing >= max(1, int(0.95 * len(unique_emails))):
+                    return {
+                        "inserted_rows": 0,
+                        "duplicate_file_processed": True,
+                        "already_processed_in_history": existing,
+                        "message": "Tu as deja traite ce fichier"
+                    }
+
+        engine = db.get_bind()
+        df_clean.to_sql(
+            name='staging_leads',
+            con=engine,
+            if_exists='append',
+            index=False,
+            method='multi',
+            chunksize=1000
+        )
+
+        db.execute(text("ALTER TABLE staging_import_history ADD COLUMN IF NOT EXISTS username TEXT"))
+        db.commit()
+        history_df = df_clean.copy()
+        history_df["filename"] = filename
+        history_df["iduser"] = userid
+        history_df["username"] = username
+        history_df = history_df[
+            ["filename", "iduser", "username", "nom", "prenom", "email", "fonction", "societe", "telephone", "linkedin", "location"]
+        ]
+        history_df.to_sql(
+            name='staging_import_history',
+            con=engine,
+            if_exists='append',
+            index=False,
+            method='multi',
+            chunksize=1000
+        )
+
+        print(f"✅ {len(df_clean)} lignes mappées insérées avec succès")
+        return {"inserted_rows": len(df_clean)}
+
+    except SQLAlchemyError as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Erreur DB : {str(e)}")
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Erreur : {str(e)}")
+
+
 def SupprimerDoublonsMemetABLE(db: Session, table: str):
     try:
         allowed_tables = {"staging_leads", "cleaning_leads", "silver_leads"}
