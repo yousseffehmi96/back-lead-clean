@@ -55,13 +55,12 @@ def _norm_name_part(v: str | None) -> str:
     s = re.sub(r"[^a-z0-9]+", "", s)
     return s
 
-def _build_email(pattern: str, prenom: str, nom: str, domaine: str, extension: str) -> str:
-    p = pattern or "{prenom}.{nom}@{domaine}.{extension}"
+def _build_email(patterne: str, prenom: str, nom: str) -> str:
+    # patterne propre à la société, ex: "{prenom}.{nom}@soprat.fr"
+    p = patterne or ""
     return (
         p.replace("{prenom}", prenom)
          .replace("{nom}", nom)
-         .replace("{domaine}", domaine)
-         .replace("{extension}", extension)
     )
 
 def SteagingAppliqueToSilver(db: Session, ids: list[int], pattern: str | None = None):
@@ -83,14 +82,14 @@ def SteagingAppliqueToSilver(db: Session, ids: list[int], pattern: str | None = 
             except Exception:
                 pattern = "{prenom}.{nom}@{domaine}.{extension}"
 
-        # map des sociétés (nom normalisé -> (domaine, extension))
-        companies = db.query(societeleads.nom, societeleads.domaine, societeleads.extension).all()
-        company_map: dict[str, tuple[str, str]] = {}
-        for nom_c, dom, ext in companies:
+        # map des sociétés (nom normalisé -> patterne)
+        companies = db.query(societeleads.nom, societeleads.patterne).all()
+        company_map: dict[str, str] = {}
+        for nom_c, patt in companies:
             k = _norm_company_key(nom_c)
             if not k:
                 continue
-            company_map[k] = (str(dom or "").strip().lower(), str(ext or "").strip().lower())
+            company_map[k] = str(patt or "").strip()
 
         leads = db.query(SteagingApplique).filter(SteagingApplique.id.in_(ids)).all()
         moved = 0
@@ -144,10 +143,10 @@ def SteagingAppliqueToSilver(db: Session, ids: list[int], pattern: str | None = 
                     details.append({"id": l.id, "reason": "societe_not_found"})
                     continue
 
-                dom, ext = company_map[soc_key]
-                if not dom or not ext:
+                patt = company_map[soc_key]
+                if not patt:
                     skipped += 1
-                    details.append({"id": l.id, "reason": "societe_domain_missing"})
+                    details.append({"id": l.id, "reason": "societe_pattern_missing"})
                     continue
 
                 email = (l.email or "").strip()
@@ -158,7 +157,7 @@ def SteagingAppliqueToSilver(db: Session, ids: list[int], pattern: str | None = 
                         skipped += 1
                         details.append({"id": l.id, "reason": "name_missing"})
                         continue
-                    email = _build_email(pattern, prenom, nom, dom, ext).strip().lower()
+                    email = _build_email(patt, prenom, nom).strip().lower()
                     email = NettoyerUnEmail(email) or email
 
                 if not email or "@" not in email or "{" in email:
@@ -1046,12 +1045,9 @@ def CompleteSocieteFromEmail(db: Session,base:str):
               AND {base}.email != ''
               AND LOWER({base}.email) != 'nan'
               AND {base}.email LIKE '%@%.%'
-              AND LOWER(TRIM(s.domaine)) = LOWER(TRIM(SPLIT_PART(SPLIT_PART({base}.email, '@', 2), '.', 1)))
-              AND (
-                    s.extension IS NULL
-                    OR s.extension = ''
-                    OR LOWER(TRIM(s.extension)) = LOWER(TRIM(SPLIT_PART({base}.email, '.', -1)))
-              )
+              AND s.patterne IS NOT NULL
+              AND s.patterne != ''
+              AND LOWER(TRIM(SPLIT_PART(s.patterne, '@', 2))) = LOWER(TRIM(SPLIT_PART({base}.email, '@', 2)))
         """))
 
         # 2) Fallback: déduire la société directement du domaine email (sans table societe_leads)

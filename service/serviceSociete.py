@@ -13,8 +13,7 @@ def AddSoc(societe: Societe, db: Session):
     try:
         data = societe.dict()
         nom = (data.get("nom") or "").strip()
-        domaine = (data.get("domaine") or "").strip()
-        extension = (data.get("extension") or "").strip()
+        patterne = (data.get("patterne") or "").strip()
 
         if not nom:
             raise HTTPException(status_code=400, detail="Le nom de la société est obligatoire")
@@ -23,7 +22,7 @@ def AddSoc(societe: Societe, db: Session):
         if exists:
             raise HTTPException(status_code=409, detail="Société déjà existante")
 
-        obj = societeleads(nom=nom, domaine=domaine, extension=extension)
+        obj = societeleads(nom=nom, patterne=patterne)
         db.add(obj)
         db.commit()
         db.refresh(obj)
@@ -44,18 +43,24 @@ def AddAuto(db: Session, base: str):
             WITH source_societes AS (
                 SELECT DISTINCT ON (LOWER(TRIM(societe)))
                     TRIM(societe) AS nom,
-                    LOWER(SPLIT_PART(SPLIT_PART(email, '@', 2), '.', 1)) AS domaine,
-                    LOWER(SPLIT_PART(SPLIT_PART(email, '@', 2), '.', -1)) AS extension
+                    REPLACE(
+                        REPLACE(
+                            LOWER(TRIM(email)),
+                            LOWER(REGEXP_REPLACE(COALESCE(prenom,''), '\\s+', '', 'g')),
+                            '{{prenom}}'
+                        ),
+                        LOWER(REGEXP_REPLACE(COALESCE(nom,''), '\\s+', '', 'g')),
+                        '{{nom}}'
+                    ) AS patterne
                 FROM {base}
                 WHERE email IS NOT NULL AND email != '' AND LOWER(email) != 'nan'
                   AND societe IS NOT NULL AND societe != '' AND LOWER(societe) != 'nan'
                 ORDER BY LOWER(TRIM(societe)), id
             )
-            INSERT INTO societe_leads (nom, domaine, extension)
+            INSERT INTO societe_leads (nom, patterne)
             SELECT
                 src.nom,
-                src.domaine,
-                src.extension
+                src.patterne
             FROM source_societes src
             WHERE NOT EXISTS (
                   SELECT 1 FROM societe_leads s

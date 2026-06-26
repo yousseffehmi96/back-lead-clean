@@ -92,6 +92,11 @@ async def StagingDispatch(base:str,payload = Body(...), db: Session = Depends(ge
         r5 = SP.CompleteNomPrenomFromEmail(db,base)
         result.update(r5)
 
+        # Auto-ajout des sociétés: tout lead avec email + nom de société
+        # absent de societe_leads est créé automatiquement (patterne dérivé de l'email du lead).
+        r_soc = Ss.AddAuto(db, base)
+        result.update(r_soc)
+
         result.update(SupprimerDoublons(db))
         
         r3 = CheckContactsBlack(db,base)

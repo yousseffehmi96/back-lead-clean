@@ -479,14 +479,14 @@ def CompleteEmail(db: Session,base:str, pattern: Optional[str] = None, overwrite
         pattern = _normalize_email_pattern(pattern)
 
         # Expression SQL pour l'email cible (utilisée aussi dans NOT EXISTS anti-doublon)
+        # L'email cible est construit à partir du patterne propre à la société
+        # (ex: "{prenom}.{nom}@soprat.fr"), seuls {prenom}/{nom} sont substitués.
         target_email_from_societe = """
             REPLACE(
                 REPLACE(
-                    REPLACE(
-                        REPLACE(:pattern, '{prenom}', LOWER(REGEXP_REPLACE(sl.prenom, '\\s+', '', 'g'))),
-                    '{nom}', LOWER(REGEXP_REPLACE(sl.nom, '\\s+', '', 'g'))),
-                '{domaine}', s.domaine),
-            '{extension}', s.extension)
+                    s.patterne,
+                    '{prenom}', LOWER(REGEXP_REPLACE(sl.prenom, '\\s+', '', 'g'))),
+                '{nom}', LOWER(REGEXP_REPLACE(sl.nom, '\\s+', '', 'g')))
         """
         target_email_from_existing = """
             REPLACE(
@@ -529,8 +529,8 @@ def CompleteEmail(db: Session,base:str, pattern: Optional[str] = None, overwrite
                   )
                   AND sl.nom IS NOT NULL AND sl.nom != '' AND sl.nom != 'nan'
                   AND sl.prenom IS NOT NULL AND sl.prenom != '' AND sl.prenom != 'nan'
-                  AND s.domaine IS NOT NULL
-                  AND s.extension IS NOT NULL
+                  AND s.patterne IS NOT NULL
+                  AND s.patterne != ''
             ),
             candidates2 AS (
                 SELECT
@@ -638,14 +638,14 @@ def PreviewEmailCollisions(
         limit_leads_per_email = max(1, min(int(limit_leads_per_email or 20), 200))
 
         # mêmes expressions que CompleteEmail
+        # L'email cible est construit à partir du patterne propre à la société
+        # (ex: "{prenom}.{nom}@soprat.fr"), seuls {prenom}/{nom} sont substitués.
         target_email_from_societe = """
             REPLACE(
                 REPLACE(
-                    REPLACE(
-                        REPLACE(:pattern, '{prenom}', LOWER(REGEXP_REPLACE(sl.prenom, '\\s+', '', 'g'))),
-                    '{nom}', LOWER(REGEXP_REPLACE(sl.nom, '\\s+', '', 'g'))),
-                '{domaine}', s.domaine),
-            '{extension}', s.extension)
+                    s.patterne,
+                    '{prenom}', LOWER(REGEXP_REPLACE(sl.prenom, '\\s+', '', 'g'))),
+                '{nom}', LOWER(REGEXP_REPLACE(sl.nom, '\\s+', '', 'g')))
         """
         target_email_from_existing = """
             REPLACE(
@@ -679,8 +679,8 @@ def PreviewEmailCollisions(
                       AND sl.prenom IS NOT NULL
                       AND sl.prenom != ''
                       AND sl.prenom != 'nan'
-                      AND s.domaine IS NOT NULL
-                      AND s.extension IS NOT NULL
+                      AND s.patterne IS NOT NULL
+                      AND s.patterne != ''
                 ),
                 candidates2 AS (
                     SELECT

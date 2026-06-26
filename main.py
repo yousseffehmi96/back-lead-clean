@@ -9,8 +9,33 @@ from fastapi.middleware.cors import CORSMiddleware
 from database.db import engine, Base
 from api.apiValidationRules import routes as validation_rules_router
 from service.serviceLeads import Rephrase
+from sqlalchemy import text
 app=FastAPI()
 Base.metadata.create_all(bind=engine)
+
+# Migration idempotente: societe_leads (domaine, extension) -> patterne
+with engine.begin() as conn:
+    conn.execute(text("""
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'societe_leads' AND column_name = 'domaine'
+            ) THEN
+                ALTER TABLE societe_leads ADD COLUMN IF NOT EXISTS patterne VARCHAR;
+                UPDATE societe_leads
+                   SET patterne = '{prenom}.{nom}@' || COALESCE(domaine, '') ||
+                       CASE WHEN COALESCE(extension, '') <> '' THEN '.' || extension ELSE '' END
+                 WHERE (patterne IS NULL OR patterne = '')
+                   AND COALESCE(domaine, '') <> '';
+                ALTER TABLE societe_leads DROP COLUMN IF EXISTS domaine;
+                ALTER TABLE societe_leads DROP COLUMN IF EXISTS extension;
+            ELSE
+                ALTER TABLE societe_leads ADD COLUMN IF NOT EXISTS patterne VARCHAR;
+            END IF;
+        END $$;
+    """))
+
 app.include_router(api_router)
 app.include_router(societe_router)
 app.include_router(Leads_router)
