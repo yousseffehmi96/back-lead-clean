@@ -117,22 +117,17 @@ async def StagingDispatch(base:str,payload = Body(...), db: Session = Depends(ge
 
         db.expire_all()
 
-        # --- DÉSACTIVÉ POUR LE MOMENT ---
-        # Tri/déplacement vers les tables finales (Gold/Silver/Clean/Applique)
-        # et vidage de la table staging. Les leads restent en staging après
-        # nettoyage/complétion/déduplication. Réactiver le bloc pour reprendre le tri.
-        # r6 = SP.StagingToGold(db,base)
-        # result.update(r6)
-        # r7 = SP.StagingToSilver(db,base)
-        # result.update(r7)
-        # if(base=="staging_leads"):
-        #         r8 = SP.StagingToClean(db)
-        #         result.update(r8)
-        #         r9 = SP.StagingToSteagingApplique(db, base)
-        #         result.update(r9)
-        #         # Sécurité: vider staging quoi qu'il reste après dispatch
-        #         r10 = SP.ClearBaseTable(db, base)
-        #         result.update(r10)
+        # Tri Gold/Silver/Clean désactivé pour le moment : on ramène TOUS les leads
+        # (après nettoyage/complétion/déduplication) vers steaging_applique.
+        # StagingToSteagingApplique insère tout depuis {base} puis vide {base}.
+        if base == "staging_leads":
+            r9 = SP.StagingToSteagingApplique(db, base)
+            result.update(r9)
+        # --- Tri par tables finales (à réactiver plus tard) ---
+        # r6 = SP.StagingToGold(db, base);  result.update(r6)
+        # r7 = SP.StagingToSilver(db, base); result.update(r7)
+        # r8 = SP.StagingToClean(db);        result.update(r8)
+        # r10 = SP.ClearBaseTable(db, base); result.update(r10)
 
         if filename:
             result["filename"] = filename
