@@ -484,9 +484,13 @@ def CompleteEmail(db: Session,base:str, pattern: Optional[str] = None, overwrite
         target_email_from_societe = """
             REPLACE(
                 REPLACE(
-                    s.patterne,
-                    '{prenom}', LOWER(REGEXP_REPLACE(sl.prenom, '\\s+', '', 'g'))),
-                '{nom}', LOWER(REGEXP_REPLACE(sl.nom, '\\s+', '', 'g')))
+                    REPLACE(
+                        REPLACE(
+                            s.patterne,
+                            '{prenom}', LOWER(REGEXP_REPLACE(sl.prenom, '\\s+', '', 'g'))),
+                        '{nom}', LOWER(REGEXP_REPLACE(sl.nom, '\\s+', '', 'g'))),
+                    '{p}', LEFT(LOWER(REGEXP_REPLACE(sl.prenom, '\\s+', '', 'g')), 1)),
+                '{n}', LEFT(LOWER(REGEXP_REPLACE(sl.nom, '\\s+', '', 'g')), 1))
         """
         target_email_from_existing = """
             REPLACE(
@@ -643,9 +647,13 @@ def PreviewEmailCollisions(
         target_email_from_societe = """
             REPLACE(
                 REPLACE(
-                    s.patterne,
-                    '{prenom}', LOWER(REGEXP_REPLACE(sl.prenom, '\\s+', '', 'g'))),
-                '{nom}', LOWER(REGEXP_REPLACE(sl.nom, '\\s+', '', 'g')))
+                    REPLACE(
+                        REPLACE(
+                            s.patterne,
+                            '{prenom}', LOWER(REGEXP_REPLACE(sl.prenom, '\\s+', '', 'g'))),
+                        '{nom}', LOWER(REGEXP_REPLACE(sl.nom, '\\s+', '', 'g'))),
+                    '{p}', LEFT(LOWER(REGEXP_REPLACE(sl.prenom, '\\s+', '', 'g')), 1)),
+                '{n}', LEFT(LOWER(REGEXP_REPLACE(sl.nom, '\\s+', '', 'g')), 1))
         """
         target_email_from_existing = """
             REPLACE(

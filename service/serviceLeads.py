@@ -56,11 +56,13 @@ def _norm_name_part(v: str | None) -> str:
     return s
 
 def _build_email(patterne: str, prenom: str, nom: str) -> str:
-    # patterne propre à la société, ex: "{prenom}.{nom}@soprat.fr"
+    # patterne propre à la société, ex: "{prenom}.{nom}@soprat.fr" ou "{n}{prenom}@soprat.fr"
     p = patterne or ""
     return (
         p.replace("{prenom}", prenom)
          .replace("{nom}", nom)
+         .replace("{p}", (prenom or "")[:1])
+         .replace("{n}", (nom or "")[:1])
     )
 
 def SteagingAppliqueToSilver(db: Session, ids: list[int], pattern: str | None = None):

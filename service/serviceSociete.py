@@ -5,6 +5,69 @@ from schema.schemaSociete import Societe
 from model.staging_leads import StagingLeads
 from sqlalchemy import func,text
 from sqlalchemy.exc import SQLAlchemyError
+import re
+import unicodedata
+
+
+def _norm_name(v) -> str:
+    """minuscule, sans accents, sans espaces (pour comparer prénom/nom)."""
+    if not v:
+        return ""
+    s = str(v).strip().lower()
+    s = unicodedata.normalize("NFD", s)
+    s = "".join(ch for ch in s if unicodedata.category(ch) != "Mn")
+    s = re.sub(r"\s+", "", s)
+    return s
+
+
+def derive_patterne(email, prenom, nom) -> str:
+    """
+    Déduit un template d'email (patterne) à partir d'un email réel + prénom/nom.
+    Reconnaît prénom/nom complets, initiales, ordre et séparateur.
+    Ex: 'j.doe@soprat.fr' (John Doe) -> '{p}.{nom}@soprat.fr'
+        'djohn@soprat.fr'            -> '{n}{prenom}@soprat.fr'
+    """
+    e = str(email or "").strip().lower()
+    if "@" not in e:
+        return e
+    local, domain = e.split("@", 1)
+    local = re.sub(r"\s+", "", local)
+
+    p_full = _norm_name(prenom)
+    n_full = _norm_name(nom)
+    pi, ni = p_full[:1], n_full[:1]
+
+    # séparateur présent dans la partie locale
+    sep = ""
+    for s in (".", "_", "-"):
+        if s in local:
+            sep = s
+            break
+
+    # candidats (template, valeur) du plus spécifique au moins spécifique
+    candidates = [
+        ("{prenom}" + sep + "{nom}", p_full + sep + n_full),
+        ("{nom}" + sep + "{prenom}", n_full + sep + p_full),
+        ("{p}" + sep + "{nom}", pi + sep + n_full),
+        ("{nom}" + sep + "{p}", n_full + sep + pi),
+        ("{n}" + sep + "{prenom}", ni + sep + p_full),
+        ("{prenom}" + sep + "{n}", p_full + sep + ni),
+        ("{p}" + sep + "{n}", pi + sep + ni),
+        ("{n}" + sep + "{p}", ni + sep + pi),
+        ("{prenom}", p_full),
+        ("{nom}", n_full),
+    ]
+    for template, value in candidates:
+        if value and value == local:
+            return template + "@" + domain
+
+    # fallback: remplacer les noms complets si présents, sinon garder tel quel
+    fallback = local
+    if p_full:
+        fallback = fallback.replace(p_full, "{prenom}")
+    if n_full:
+        fallback = fallback.replace(n_full, "{nom}")
+    return fallback + "@" + domain
 
 def AddSoc(societe: Societe, db: Session):
     """
@@ -39,38 +102,43 @@ def AddAuto(db: Session, base: str):
     (ex: staging_leads, silver_leads, etc.)
     """
     try:
-        result = db.execute(text(f"""
-            WITH source_societes AS (
-                SELECT DISTINCT ON (LOWER(TRIM(societe)))
-                    TRIM(societe) AS nom,
-                    REPLACE(
-                        REPLACE(
-                            LOWER(TRIM(email)),
-                            LOWER(REGEXP_REPLACE(COALESCE(prenom,''), '\\s+', '', 'g')),
-                            '{{prenom}}'
-                        ),
-                        LOWER(REGEXP_REPLACE(COALESCE(nom,''), '\\s+', '', 'g')),
-                        '{{nom}}'
-                    ) AS patterne
-                FROM {base}
-                WHERE email IS NOT NULL AND email != '' AND LOWER(email) != 'nan'
-                  AND societe IS NOT NULL AND societe != '' AND LOWER(societe) != 'nan'
-                ORDER BY LOWER(TRIM(societe)), id
+        # Un représentant par société (priorité aux lignes avec prénom ET nom non vides).
+        rows = db.execute(text(f"""
+            SELECT DISTINCT ON (LOWER(TRIM(societe)))
+                TRIM(societe) AS nom,
+                email, prenom, nom AS nom_lead
+            FROM {base}
+            WHERE email IS NOT NULL AND email != '' AND LOWER(email) != 'nan'
+              AND societe IS NOT NULL AND societe != '' AND LOWER(societe) != 'nan'
+            ORDER BY
+                LOWER(TRIM(societe)),
+                (CASE WHEN COALESCE(prenom,'') <> '' AND COALESCE(nom,'') <> '' THEN 0 ELSE 1 END),
+                id
+        """)).mappings().all()
+
+        # Sociétés déjà présentes (comparaison insensible à la casse)
+        existing = {
+            str(r[0]).strip().lower()
+            for r in db.execute(text("SELECT nom FROM societe_leads")).all()
+            if r[0]
+        }
+
+        added_count = 0
+        seen = set()
+        for r in rows:
+            nom_soc = (r["nom"] or "").strip()
+            key = nom_soc.lower()
+            if not nom_soc or key in existing or key in seen:
+                continue
+            patterne = derive_patterne(r["email"], r["prenom"], r["nom_lead"])
+            res = db.execute(
+                text("INSERT INTO societe_leads (nom, patterne) VALUES (:nom, :patterne) ON CONFLICT (nom) DO NOTHING"),
+                {"nom": nom_soc, "patterne": patterne},
             )
-            INSERT INTO societe_leads (nom, patterne)
-            SELECT
-                src.nom,
-                src.patterne
-            FROM source_societes src
-            WHERE NOT EXISTS (
-                  SELECT 1 FROM societe_leads s
-                  WHERE LOWER(s.nom) = LOWER(src.nom)
-              )
-            ON CONFLICT (nom) DO NOTHING
-        """))
+            seen.add(key)
+            added_count += int(res.rowcount or 0)
 
         db.commit()
-        added_count = result.rowcount
         return {"added_societes": int(added_count or 0)}
     except SQLAlchemyError as e:
         db.rollback()
