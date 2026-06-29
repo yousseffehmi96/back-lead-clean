@@ -83,6 +83,9 @@ async def StagingDispatch(base:str,payload = Body(...), db: Session = Depends(ge
             filename = str(payload or "")
 
         result = {}
+        # Nettoyage des caractères spéciaux (noms, société, téléphone, email…) avant tout traitement
+        result.update(CleanSpecialChars(db, base))
+
         r2 = CompleteEmail(db,base, pattern=email_pattern)
         result.update(r2)
         
@@ -92,8 +95,6 @@ async def StagingDispatch(base:str,payload = Body(...), db: Session = Depends(ge
         r5 = SP.CompleteNomPrenomFromEmail(db,base)
         result.update(r5)
 
-        # Auto-ajout des sociétés: tout lead avec email + nom de société
-        # absent de societe_leads est créé automatiquement (patterne dérivé de l'email du lead).
         r_soc = Ss.AddAuto(db, base)
         result.update(r_soc)
 

@@ -820,6 +820,59 @@ def CheckContactsBlack(db: Session, base: str):
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Erreur CheckContactsBlack : {str(e)}")
 
+def CleanSpecialChars(db: Session, base: str):
+    """
+    Nettoie les caractères spéciaux des leads d'une table (générique sur {base}).
+    - nom, prénom, fonction, société, location : texte (sans accents/caractères spéciaux)
+    - téléphone : chiffres uniquement
+    - email : caractères email valides uniquement
+    Le LinkedIn n'est pas touché (URL).
+    """
+    from sqlalchemy import text
+    try:
+        rows = db.execute(text(f"""
+            SELECT id, nom, prenom, fonction, societe, telephone, email, location
+            FROM {base}
+        """)).mappings().all()
+
+        cleaned = 0
+        for r in rows:
+            new = {
+                "nom": NetoyerUneChaine(r["nom"]),
+                "prenom": NetoyerUneChaine(r["prenom"]),
+                "fonction": NetoyerUneChaine(r["fonction"]),
+                "societe": NetoyerUneChaine(r["societe"]),
+                "location": NetoyerUneChaine(r["location"]),
+                "telephone": NetoyerUnNumero(r["telephone"]),
+                "email": NettoyerUnEmail(r["email"]),
+            }
+            # Mettre à jour uniquement si une valeur change réellement
+            changed = any(
+                (new[k] or "") != ("" if r[k] is None else str(r[k]))
+                for k in new
+            )
+            if not changed:
+                continue
+            db.execute(text(f"""
+                UPDATE {base}
+                SET nom=:nom, prenom=:prenom, fonction=:fonction, societe=:societe,
+                    location=:location, telephone=:telephone, email=:email
+                WHERE id=:id
+            """), {**new, "id": r["id"]})
+            cleaned += 1
+
+        db.commit()
+        print(f"✅ {cleaned} leads nettoyés (caractères spéciaux)")
+        return {"cleaned_special_chars": cleaned}
+
+    except SQLAlchemyError as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Erreur base de données : {str(e)}")
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Erreur inattendue : {str(e)}")
+
+
 def nettoyer_contact(db: Session):
     try:
         result = db.query(StagingLeads).all()
