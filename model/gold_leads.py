@@ -7,13 +7,13 @@ class Gold_leads(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
 
-    email = Column(String(255), unique=True, index=True)
+    email = Column(Text, unique=True, index=True)
 
-    nom = Column(String(100))
-    prenom = Column(String(100))
-    fonction = Column(String(150))
-    societe = Column(String(150))
-    telephone = Column(String(50))
+    nom = Column(Text)
+    prenom = Column(Text)
+    fonction = Column(Text)
+    societe = Column(Text)
+    telephone = Column(Text)
     linkedin = Column(Text)
     location = Column(Text)
     statu = Column(String(50))

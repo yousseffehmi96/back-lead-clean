@@ -5,12 +5,12 @@ class blacklistLeads(Base):
     __tablename__ = "blacklist_leads"
 
     id = Column(Integer, autoincrement=True)
-    nom = Column(String(100))
-    prenom = Column(String(100))
-    email = Column(String(255), primary_key=True, index=True)
-    fonction = Column(String(150))
-    societe = Column(String(150))
-    telephone = Column(String(50))
+    nom = Column(Text)
+    prenom = Column(Text)
+    email = Column(Text, primary_key=True, index=True)
+    fonction = Column(Text)
+    societe = Column(Text)
+    telephone = Column(Text)
     linkedin = Column(Text)
     location = Column(Text)
     eliminer = Column(Enum("Unsubscribe", "archive", name="eliminer_enum"))

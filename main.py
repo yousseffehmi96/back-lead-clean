@@ -36,6 +36,25 @@ with engine.begin() as conn:
         END $$;
     """))
 
+# Migration idempotente: colonnes de leads varchar(n) -> TEXT (évite "value too long")
+# Les données circulent depuis staging_leads (TEXT) vers ces tables.
+with engine.begin() as conn:
+    conn.execute(text("""
+        DO $$
+        DECLARE r RECORD;
+        BEGIN
+            FOR r IN
+                SELECT table_name, column_name
+                FROM information_schema.columns
+                WHERE table_name IN ('cleaning_leads','silver_leads','gold_leads','blacklist_leads')
+                  AND column_name IN ('nom','prenom','email','fonction','societe','telephone')
+                  AND data_type = 'character varying'
+            LOOP
+                EXECUTE format('ALTER TABLE %I ALTER COLUMN %I TYPE TEXT', r.table_name, r.column_name);
+            END LOOP;
+        END $$;
+    """))
+
 app.include_router(api_router)
 app.include_router(societe_router)
 app.include_router(Leads_router)

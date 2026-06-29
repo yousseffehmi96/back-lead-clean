@@ -5,12 +5,12 @@ class cleaningleads(Base):
     __tablename__ = "cleaning_leads"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    nom = Column(String(100))
-    prenom = Column(String(100))
-    email = Column(String(255))
-    fonction = Column(String(150))
-    societe = Column(String(150))
-    telephone = Column(String(50))
+    nom = Column(Text)
+    prenom = Column(Text)
+    email = Column(Text)
+    fonction = Column(Text)
+    societe = Column(Text)
+    telephone = Column(Text)
     linkedin = Column(Text)
     location = Column(Text)
 
