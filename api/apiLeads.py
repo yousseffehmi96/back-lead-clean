@@ -53,6 +53,15 @@ async def SteagingAppliqueToSilver(payload = Body(...), db: Session = Depends(ge
                 pattern = payload.get("pattern")
         return SP.SteagingAppliqueToSilver(db, ids=ids, pattern=pattern)
 
+@router.post("/steaging-applique/verify/{id}")
+def verify_applique_lead(id: int, db: Session = Depends(get_db)):
+        return SP.VerifyAppliqueLead(db, id)
+
+@router.post("/steaging-applique/verify-bulk")
+def verify_applique_bulk(payload = Body(...), db: Session = Depends(get_db)):
+        ids = payload.get("ids") or [] if isinstance(payload, dict) else []
+        return SP.VerifyAppliqueBulk(db, ids)
+
 @router.get("/staging-import-history")
 async def GetStagingImportHistory(userid: str | None = None, is_manager: bool = False, db: Session = Depends(get_db)):
         if not is_manager and not userid:
@@ -95,8 +104,8 @@ async def StagingDispatch(base:str,payload = Body(...), db: Session = Depends(ge
         r5 = SP.CompleteNomPrenomFromEmail(db,base)
         result.update(r5)
 
-        r_soc = Ss.AddAuto(db, base)
-        result.update(r_soc)
+        #r_soc = Ss.AddAuto(db, base)
+        #result.update(r_soc)
 
         result.update(SupprimerDoublons(db))
         

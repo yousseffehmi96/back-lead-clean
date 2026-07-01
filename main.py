@@ -55,6 +55,14 @@ with engine.begin() as conn:
         END $$;
     """))
 
+# Migration idempotente: colonne statu sur steaging_applique (vérification email)
+with engine.begin() as conn:
+    conn.execute(text("ALTER TABLE steaging_applique ADD COLUMN IF NOT EXISTS statu TEXT"))
+
+# Migration idempotente: colonne regex sur societe_leads (vérification du patterne)
+with engine.begin() as conn:
+    conn.execute(text("ALTER TABLE societe_leads ADD COLUMN IF NOT EXISTS regex VARCHAR"))
+
 app.include_router(api_router)
 app.include_router(societe_router)
 app.include_router(Leads_router)

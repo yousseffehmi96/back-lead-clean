@@ -61,6 +61,28 @@ def derive_patterne(email, prenom, nom) -> str:
         if value and value == local:
             return template + "@" + domain
 
+    # Inférence par position : local-part "A<sep>B" (2 segments alphabétiques).
+    # Si un seul côté matche un nom, on déduit l'autre comme le nom complémentaire.
+    if sep and local.count(sep) == 1:
+        a, b = local.split(sep, 1)
+        if re.fullmatch(r"[a-z]+", a) and re.fullmatch(r"[a-z]+", b):
+            def classify(seg):
+                if p_full and seg == p_full: return "{prenom}", "prenom"
+                if n_full and seg == n_full: return "{nom}", "nom"
+                if pi and seg == pi:         return "{p}", "prenom"
+                if ni and seg == ni:         return "{n}", "nom"
+                return None, None
+            ta, side_a = classify(a)
+            tb, side_b = classify(b)
+            if ta and tb:
+                return ta + sep + tb + "@" + domain
+            if ta and not tb:                                   # A reconnu -> B = complémentaire
+                tb = "{nom}" if side_a == "prenom" else "{prenom}"
+                return ta + sep + tb + "@" + domain
+            if tb and not ta:                                   # B reconnu -> A = complémentaire
+                ta = "{nom}" if side_b == "prenom" else "{prenom}"
+                return ta + sep + tb + "@" + domain
+
     # fallback: remplacer les noms complets si présents, sinon garder tel quel
     fallback = local
     if p_full:
@@ -77,6 +99,7 @@ def AddSoc(societe: Societe, db: Session):
         data = societe.dict()
         nom = (data.get("nom") or "").strip()
         patterne = (data.get("patterne") or "").strip()
+        regex = (data.get("regex") or "").strip()
 
         if not nom:
             raise HTTPException(status_code=400, detail="Le nom de la société est obligatoire")
@@ -85,7 +108,7 @@ def AddSoc(societe: Societe, db: Session):
         if exists:
             raise HTTPException(status_code=409, detail="Société déjà existante")
 
-        obj = societeleads(nom=nom, patterne=patterne)
+        obj = societeleads(nom=nom, patterne=patterne, regex=regex)
         db.add(obj)
         db.commit()
         db.refresh(obj)

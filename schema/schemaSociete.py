@@ -4,3 +4,4 @@ from typing import Optional
 class Societe(BaseModel):
     nom: str
     patterne: Optional[str] = None
+    regex: Optional[str] = None

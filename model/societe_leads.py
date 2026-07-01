@@ -6,3 +6,4 @@ class societeleads (Base):
      id=Column(Integer,primary_key=True,autoincrement=True)
      nom=Column(String,unique=True)
      patterne=Column(String)
+     regex=Column(String)

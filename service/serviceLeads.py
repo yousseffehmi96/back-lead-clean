@@ -139,6 +139,12 @@ def SteagingAppliqueToSilver(db: Session, ids: list[int], pattern: str | None = 
 
         for l in leads:
             try:
+                # Email vérifié comme non disponible -> on n'envoie pas vers Silver
+                if str(getattr(l, "statu", "") or "").strip().lower() == "non disponible":
+                    skipped += 1
+                    details.append({"id": l.id, "reason": "email_non_disponible"})
+                    continue
+
                 soc_key = _norm_company_key(l.societe)
                 if not soc_key or soc_key not in company_map:
                     skipped += 1
@@ -1741,7 +1747,10 @@ def send_and_check(to_email: str, db: Session = None) -> dict:
                     lead = db.query(Gold_leads).filter(Gold_leads.email == to_email).first()
                 if lead:
                     lead.statu = "non disponible"
-                    db.commit()
+                db.query(SteagingApplique).filter(SteagingApplique.email == to_email).update(
+                    {SteagingApplique.statu: "non disponible"}, synchronize_session=False
+                )
+                db.commit()
             return {
                 "email":  to_email,
                 "status": "❌ bounce — adresse introuvable",
@@ -1757,10 +1766,156 @@ def send_and_check(to_email: str, db: Session = None) -> dict:
             lead = db.query(Gold_leads).filter(Gold_leads.email == to_email).first()
         if lead:
             lead.statu = "disponible"
-            db.commit()
+        db.query(SteagingApplique).filter(SteagingApplique.email == to_email).update(
+            {SteagingApplique.statu: "disponible"}, synchronize_session=False
+        )
+        db.commit()
     return {
         "email":  to_email,
         "status": "✅ livré (pas de bounce)",
         "code":   250,
         "raison": "Aucun bounce reçu après 10s"
     }
+
+
+def _company_map_regex_patterne(db: Session):
+    """map: nom société normalisé -> (regex, patterne)"""
+    rows = db.query(societeleads.nom, societeleads.regex, societeleads.patterne).all()
+    m = {}
+    for nom, rgx, patt in rows:
+        k = _norm_company_key(nom)
+        if k:
+            m[k] = (str(rgx or "").strip(), str(patt or "").strip())
+    return m
+
+
+def _patterne_to_regex(patterne: str) -> str:
+    """
+    Construit un regex générique à partir du patterne : on ne verrouille que le DOMAINE
+    (partie après @) ; le local-part accepte tous les formats de nom possibles
+    ({prenom}.{nom}, {p}.{nom}, {nom}.{prenom}, {p}{nom}, {n}{prenom}, jd, ...).
+    Ex: "{prenom}.{nom}@soprat.fr" -> "^[a-z]+([._-][a-z]+)*@soprat\\.fr$"
+    """
+    pat = (patterne or "").strip()
+    if "@" not in pat:
+        return ""
+    domain = pat.split("@", 1)[1].strip()
+    if not domain:
+        return ""
+    return "^[a-z]+([._-][a-z]+)*@" + re.escape(domain) + "$"
+
+
+def _autoadd_societe_from_email(db: Session, nom_soc: str, email: str, prenom, nom):
+    """
+    Ajoute la société (patterne + regex dérivés de l'email livré) si elle n'existe pas.
+    Retourne (regex, patterne) si ajoutée, sinon None.
+    """
+    nom_soc = (nom_soc or "").strip()
+    if not nom_soc:
+        return None
+    exists = db.query(societeleads).filter(societeleads.nom.ilike(nom_soc)).first()
+    if exists:
+        return None
+    import service.serviceSociete as sso
+    patterne = sso.derive_patterne(email, prenom, nom)
+    regex = _patterne_to_regex(patterne)
+    try:
+        db.add(societeleads(nom=nom_soc, patterne=patterne, regex=regex))
+        db.commit()
+    except Exception:
+        db.rollback()
+        return None
+    return (regex, patterne)
+
+
+def _verify_one_applique(db: Session, lead, company_map: dict) -> dict:
+    """
+    Flux de vérification d'un lead applique :
+    1) On teste l'email actuel (SMTP).
+       - livré -> disponible + auto-ajout société (patterne + regex dérivés de l'email).
+    2) Sinon on cherche la société :
+       - inconnue -> non disponible.
+       - connue : si l'email est déjà au bon format (regex/patterne) mais non livré -> non disponible ;
+         sinon on génère l'email correct depuis le patterne et on le teste :
+           livré -> on CHANGE l'email du lead + disponible ; sinon -> non disponible.
+    """
+    email = (lead.email or "").strip()
+    nom_soc = (lead.societe or "").strip()
+    key = _norm_company_key(nom_soc)
+
+    # 1) Test SMTP de l'email actuel
+    if email and "@" in email:
+        r1 = send_and_check(email, db)
+        if int(r1.get("code", 0) or 0) == 250:
+            lead.statu = "disponible"
+            db.commit()
+            added = _autoadd_societe_from_email(db, nom_soc, email, lead.prenom, lead.nom)
+            if added and key:
+                company_map[key] = added  # (regex, patterne)
+            return {"id": lead.id, "email": email, "statu": "disponible",
+                    "regenerated": False, "code": 250, "societe_added": bool(added)}
+
+    # 2) Non livré (ou pas d'email) -> société connue ?
+    regex, patterne = company_map.get(key, ("", ""))
+    if not patterne:
+        lead.statu = "non disponible"
+        db.commit()
+        return {"id": lead.id, "email": email, "statu": "non disponible",
+                "regenerated": False, "reason": "societe_inconnue"}
+
+    # 3) L'email est-il déjà au bon format ?
+    eff_regex = regex or _patterne_to_regex(patterne)
+    already_ok = False
+    if email and eff_regex:
+        try:
+            already_ok = re.search(eff_regex, email, re.IGNORECASE) is not None
+        except re.error:
+            already_ok = False
+    if already_ok:
+        lead.statu = "non disponible"
+        db.commit()
+        return {"id": lead.id, "email": email, "statu": "non disponible",
+                "regenerated": False, "reason": "email_correct_non_livre"}
+
+    # 4) Générer l'email correct depuis le patterne et le tester
+    gen = _build_email(patterne, _norm_name_part(lead.prenom), _norm_name_part(lead.nom))
+    gen = (NettoyerUnEmail(gen) or gen or "").strip()
+    if not gen or "@" not in gen or "{" in gen:
+        lead.statu = "non disponible"
+        db.commit()
+        return {"id": lead.id, "email": email, "statu": "non disponible",
+                "regenerated": False, "reason": "generation_impossible"}
+
+    r2 = send_and_check(gen, db)
+    if int(r2.get("code", 0) or 0) == 250:
+        lead.email = gen          # email livré -> on le sauvegarde
+        lead.statu = "disponible"
+        db.commit()
+        return {"id": lead.id, "email": gen, "statu": "disponible",
+                "regenerated": True, "code": 250}
+    lead.statu = "non disponible"
+    db.commit()
+    return {"id": lead.id, "email": gen, "statu": "non disponible",
+            "regenerated": True, "code": r2.get("code")}
+
+
+def VerifyAppliqueLead(db: Session, lead_id: int) -> dict:
+    lead = db.query(SteagingApplique).filter(SteagingApplique.id == lead_id).first()
+    if not lead:
+        raise HTTPException(status_code=404, detail="Lead introuvable")
+    cm = _company_map_regex_patterne(db)
+    return _verify_one_applique(db, lead, cm)
+
+
+def VerifyAppliqueBulk(db: Session, ids: list) -> dict:
+    if not ids:
+        return {"results": [], "verified": 0}
+    cm = _company_map_regex_patterne(db)
+    leads = db.query(SteagingApplique).filter(SteagingApplique.id.in_(ids)).all()
+    results = []
+    for lead in leads:
+        try:
+            results.append(_verify_one_applique(db, lead, cm))
+        except Exception as e:
+            results.append({"id": lead.id, "statu": "erreur", "reason": str(e)})
+    return {"results": results, "verified": len(results)}

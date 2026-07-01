@@ -14,6 +14,7 @@ class SteagingApplique(Base):
     telephone = Column(Text, nullable=True)
     linkedin = Column(Text, nullable=True)
     location = Column(Text, nullable=True)
+    statu = Column(Text, nullable=True)
     created_at = Column(
         TIMESTAMP,
         server_default=text("CURRENT_TIMESTAMP")
