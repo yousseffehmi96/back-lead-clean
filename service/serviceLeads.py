@@ -1805,98 +1805,105 @@ def _patterne_to_regex(patterne: str) -> str:
     return "^[a-z]+([._-][a-z]+)*@" + re.escape(domain) + "$"
 
 
+def _split_lines(s) -> list:
+    """Découpe une valeur multi-lignes en liste (une entrée par ligne non vide)."""
+    return [x.strip() for x in str(s or "").replace("\r", "").split("\n") if x.strip()]
+
+
 def _autoadd_societe_from_email(db: Session, nom_soc: str, email: str, prenom, nom):
     """
-    Ajoute la société (patterne + regex dérivés de l'email livré) si elle n'existe pas.
-    Retourne (regex, patterne) si ajoutée, sinon None.
+    À partir d'un email livré : dérive patterne + regex.
+    - Société inexistante -> on la crée.
+    - Société existante -> on AJOUTE ce format s'il est nouveau (multi-patternes).
+    Retourne (regex, patterne) [valeurs stockées, multi-lignes] si créé/modifié, sinon None.
     """
     nom_soc = (nom_soc or "").strip()
     if not nom_soc:
         return None
-    exists = db.query(societeleads).filter(societeleads.nom.ilike(nom_soc)).first()
-    if exists:
-        return None
     import service.serviceSociete as sso
     patterne = sso.derive_patterne(email, prenom, nom)
+    if not patterne:
+        return None
     regex = _patterne_to_regex(patterne)
     try:
-        db.add(societeleads(nom=nom_soc, patterne=patterne, regex=regex))
+        exists = db.query(societeleads).filter(societeleads.nom.ilike(nom_soc)).first()
+        if not exists:
+            db.add(societeleads(nom=nom_soc, patterne=patterne, regex=regex))
+            db.commit()
+            return (regex, patterne)
+        # Société existante : ajouter le format s'il n'y est pas déjà
+        patts = _split_lines(exists.patterne)
+        if patterne in patts:
+            return None
+        patts.append(patterne)
+        regs = _split_lines(exists.regex)
+        if regex and regex not in regs:
+            regs.append(regex)
+        exists.patterne = "\n".join(patts)
+        exists.regex = "\n".join(regs)
         db.commit()
+        return (exists.regex, exists.patterne)
     except Exception:
         db.rollback()
         return None
-    return (regex, patterne)
 
 
 def _verify_one_applique(db: Session, lead, company_map: dict) -> dict:
     """
-    Flux de vérification d'un lead applique :
+    Flux de vérification d'un lead applique (supporte plusieurs patternes par société) :
     1) On teste l'email actuel (SMTP).
-       - livré -> disponible + auto-ajout société (patterne + regex dérivés de l'email).
-    2) Sinon on cherche la société :
-       - inconnue -> non disponible.
-       - connue : si l'email est déjà au bon format (regex/patterne) mais non livré -> non disponible ;
-         sinon on génère l'email correct depuis le patterne et on le teste :
-           livré -> on CHANGE l'email du lead + disponible ; sinon -> non disponible.
+       - livré -> disponible + auto-ajout/enrichissement société (patterne + regex dérivés).
+    2) Sinon, société connue ? sinon -> non disponible.
+    3) On génère et teste CHAQUE patterne de la société (en évitant de retester le même email) ;
+       le 1er livré -> on CHANGE l'email + disponible ; si aucun -> non disponible.
     """
-    email = (lead.email or "").strip()
+    email = (lead.email or "").strip().lower()
     nom_soc = (lead.societe or "").strip()
     key = _norm_company_key(nom_soc)
+    tested = set()
 
     # 1) Test SMTP de l'email actuel
     if email and "@" in email:
         r1 = send_and_check(email, db)
+        tested.add(email)
         if int(r1.get("code", 0) or 0) == 250:
             lead.statu = "disponible"
             db.commit()
             added = _autoadd_societe_from_email(db, nom_soc, email, lead.prenom, lead.nom)
             if added and key:
-                company_map[key] = added  # (regex, patterne)
+                company_map[key] = added  # (regex, patterne) rafraîchis
             return {"id": lead.id, "email": email, "statu": "disponible",
                     "regenerated": False, "code": 250, "societe_added": bool(added)}
 
-    # 2) Non livré (ou pas d'email) -> société connue ?
-    regex, patterne = company_map.get(key, ("", ""))
-    if not patterne:
+    # 2) Société connue ?
+    _regex, patterne_raw = company_map.get(key, ("", ""))
+    patternes = _split_lines(patterne_raw)
+    if not patternes:
         lead.statu = "non disponible"
         db.commit()
         return {"id": lead.id, "email": email, "statu": "non disponible",
                 "regenerated": False, "reason": "societe_inconnue"}
 
-    # 3) L'email est-il déjà au bon format ?
-    eff_regex = regex or _patterne_to_regex(patterne)
-    already_ok = False
-    if email and eff_regex:
-        try:
-            already_ok = re.search(eff_regex, email, re.IGNORECASE) is not None
-        except re.error:
-            already_ok = False
-    if already_ok:
-        lead.statu = "non disponible"
-        db.commit()
-        return {"id": lead.id, "email": email, "statu": "non disponible",
-                "regenerated": False, "reason": "email_correct_non_livre"}
+    # 3) Essayer chaque patterne jusqu'à un email livrable
+    p = _norm_name_part(lead.prenom)
+    n = _norm_name_part(lead.nom)
+    for patt in patternes:
+        gen = _build_email(patt, p, n)
+        gen = (NettoyerUnEmail(gen) or gen or "").strip().lower()
+        if not gen or "@" not in gen or "{" in gen or gen in tested:
+            continue
+        tested.add(gen)
+        r = send_and_check(gen, db)
+        if int(r.get("code", 0) or 0) == 250:
+            lead.email = gen           # email livré -> on le sauvegarde
+            lead.statu = "disponible"
+            db.commit()
+            return {"id": lead.id, "email": gen, "statu": "disponible",
+                    "regenerated": True, "code": 250, "patterne": patt}
 
-    # 4) Générer l'email correct depuis le patterne et le tester
-    gen = _build_email(patterne, _norm_name_part(lead.prenom), _norm_name_part(lead.nom))
-    gen = (NettoyerUnEmail(gen) or gen or "").strip()
-    if not gen or "@" not in gen or "{" in gen:
-        lead.statu = "non disponible"
-        db.commit()
-        return {"id": lead.id, "email": email, "statu": "non disponible",
-                "regenerated": False, "reason": "generation_impossible"}
-
-    r2 = send_and_check(gen, db)
-    if int(r2.get("code", 0) or 0) == 250:
-        lead.email = gen          # email livré -> on le sauvegarde
-        lead.statu = "disponible"
-        db.commit()
-        return {"id": lead.id, "email": gen, "statu": "disponible",
-                "regenerated": True, "code": 250}
     lead.statu = "non disponible"
     db.commit()
-    return {"id": lead.id, "email": gen, "statu": "non disponible",
-            "regenerated": True, "code": r2.get("code")}
+    return {"id": lead.id, "email": email, "statu": "non disponible", "regenerated": False}
 
 
 def VerifyAppliqueLead(db: Session, lead_id: int) -> dict:
