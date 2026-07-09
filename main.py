@@ -93,11 +93,14 @@ with engine.begin() as conn:
         WHERE patterne ~ '[._-]+@'
     """))
 
-app.include_router(api_router)
-app.include_router(societe_router)
-app.include_router(Leads_router)
-app.include_router(validation_rules_router)
-app.include_router(Token_router)
+from util.auth import require_auth
+# Sécurité : toutes les routes exigent un token Clerk valide (si REQUIRE_AUTH=true)
+_secured = [Depends(require_auth)]
+app.include_router(api_router, dependencies=_secured)
+app.include_router(societe_router, dependencies=_secured)
+app.include_router(Leads_router, dependencies=_secured)
+app.include_router(validation_rules_router, dependencies=_secured)
+app.include_router(Token_router, dependencies=_secured)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
