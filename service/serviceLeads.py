@@ -2020,20 +2020,24 @@ def _verify_one_applique(db: Session, lead, company_map: dict) -> dict:
             return {"id": lead.id, "email": gen, "statu": "disponible",
                     "regenerated": True, "patterne": patt, "trusted": True}
 
-    # 2) Pas de patterne exploitable -> tester l'email actuel via SMTP
+    # 2) Pas de patterne exploitable -> tester l'email actuel via SMTP.
+    #    On fait CONFIANCE : disponible sauf REJET explicite (550) du serveur.
+    #    250 = accepté, 450 = catch-all/greylist (non concluant) -> disponible ;
+    #    550 = mailbox inexistante, 0 = injoignable -> non disponible.
     if email and "@" in email:
         code = int(smtp_probe(email).get("code", 0) or 0)
-        if code == 250:
+        if code in (250, 450):
             lead.statu = "disponible"
             db.commit()
-            # Email livré -> on apprend la société (patterne + regex dérivés de cet email)
+            # Email accepté/non concluant -> on apprend la société (patterne + regex dérivés)
             added = _autoadd_societe_from_email(db, nom_soc, email, lead.prenom, lead.nom)
             if added and key:
                 company_map[key] = added
             return {"id": lead.id, "email": email, "statu": "disponible",
-                    "regenerated": False, "code": 250, "societe_added": bool(added), "trusted": False}
+                    "regenerated": False, "code": code, "societe_added": bool(added),
+                    "trusted": code != 250}
 
-    # 3) Rien -> non disponible
+    # 3) Rejet explicite (550) ou serveur injoignable -> non disponible
     lead.statu = "non disponible"
     db.commit()
     return {"id": lead.id, "email": email, "statu": "non disponible", "regenerated": False, "trusted": False}
