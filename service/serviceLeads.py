@@ -1992,56 +1992,51 @@ def _autoadd_societe_from_email(db: Session, nom_soc: str, email: str, prenom, n
 
 def _verify_one_applique(db: Session, lead, company_map: dict) -> dict:
     """
-    Flux de vérification d'un lead applique (supporte plusieurs patternes par société) :
-    1) Société connue ? -> on génère et teste CHAQUE patterne (RCPT) ;
-       le 1er livré -> on met cet email + disponible.
-    2) Sinon (aucun patterne livré, ou société inconnue) -> on teste l'email ACTUEL du lead ;
-       - livré -> disponible + auto-ajout/enrichissement société (patterne + regex dérivés).
-    3) Rien de livrable -> non disponible.
+    Flux de vérification :
+    1) Société AVEC patterne -> on génère l'email depuis le patterne et on marque DISPONIBLE
+       DIRECTEMENT, SANS test SMTP (on fait confiance au patterne).
+    2) Sinon (pas de patterne / génération impossible) -> on TESTE l'email actuel via la sonde SMTP.
+       - livré (250) -> disponible + on APPREND la société (patterne + regex dérivés de cet email).
+       - sinon -> non disponible.
     """
     email = (lead.email or "").strip().lower()
     nom_soc = (lead.societe or "").strip()
     key = _norm_company_key(nom_soc)
-    tested = set()
-
-    # 1) Société connue -> essayer chaque patterne d'abord
     _regex, patterne_raw = company_map.get(key, ("", ""))
     patternes = _split_lines(patterne_raw)
+
+    # 1) Patterne trouvé -> disponible sans vérifier le serveur
     if patternes:
         p = _norm_name_part(lead.prenom)
         n = _norm_name_part(lead.nom)
         for patt in patternes:
             gen = _build_email(patt, p, n)
             gen = (NettoyerUnEmail(gen) or gen or "").strip().lower()
-            if not gen or "@" not in gen or "{" in gen or gen in tested:
+            if not gen or "@" not in gen or "{" in gen:
                 continue
-            tested.add(gen)
-            r = send_and_check(gen, db)
-            if int(r.get("code", 0) or 0) == 250:
-                lead.email = gen           # patterne livré -> on le sauvegarde
-                lead.statu = "disponible"
-                db.commit()
-                return {"id": lead.id, "email": gen, "statu": "disponible",
-                        "regenerated": True, "code": 250, "patterne": patt}
-
-    # 2) Aucun patterne livré (ou société inconnue) -> tester l'email actuel du lead
-    if email and "@" in email and email not in tested:
-        r1 = send_and_check(email, db)
-        tested.add(email)
-        if int(r1.get("code", 0) or 0) == 250:
+            lead.email = gen
             lead.statu = "disponible"
             db.commit()
-            # Email actuel livré -> on apprend la société (patterne + regex dérivés de cet email)
+            return {"id": lead.id, "email": gen, "statu": "disponible",
+                    "regenerated": True, "patterne": patt, "trusted": True}
+
+    # 2) Pas de patterne exploitable -> tester l'email actuel via SMTP
+    if email and "@" in email:
+        code = int(smtp_probe(email).get("code", 0) or 0)
+        if code == 250:
+            lead.statu = "disponible"
+            db.commit()
+            # Email livré -> on apprend la société (patterne + regex dérivés de cet email)
             added = _autoadd_societe_from_email(db, nom_soc, email, lead.prenom, lead.nom)
             if added and key:
-                company_map[key] = added  # (regex, patterne) rafraîchis
+                company_map[key] = added
             return {"id": lead.id, "email": email, "statu": "disponible",
-                    "regenerated": False, "code": 250, "societe_added": bool(added)}
+                    "regenerated": False, "code": 250, "societe_added": bool(added), "trusted": False}
 
-    # 3) Rien de livrable
+    # 3) Rien -> non disponible
     lead.statu = "non disponible"
     db.commit()
-    return {"id": lead.id, "email": email, "statu": "non disponible", "regenerated": False}
+    return {"id": lead.id, "email": email, "statu": "non disponible", "regenerated": False, "trusted": False}
 
 
 def VerifyAppliqueLead(db: Session, lead_id: int) -> dict:

@@ -148,9 +148,10 @@ async def StagingDispatch(base:str,payload = Body(...), db: Session = Depends(ge
 
         if filename:
             result["filename"] = filename
+            # "Déjà traité" UNIQUEMENT si TOUTES les lignes importées étaient des doublons
+            # (le déplacement vers applique/staging est un succès normal, PAS un "déjà traité").
             total_deleted = int(result.get("total_deleted", 0) or 0)
-            moved_to_applique = int(result.get("moved_to_steaging_applique", 0) or 0)
-            handled_as_already_processed = total_deleted + moved_to_applique
+            handled_as_already_processed = total_deleted
             if inserted_rows > 0 and handled_as_already_processed == inserted_rows and userid:
                 rollback_result = rollback_duplicate_upload_records(db, filename, userid, inserted_rows)
                 result.update(rollback_result)
