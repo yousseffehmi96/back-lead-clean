@@ -37,63 +37,67 @@ def derive_patterne(email, prenom, nom) -> str:
     local = local.strip("._-")
     domain = domain.strip(".")
 
-    p_full = _norm_name(prenom)
-    n_full = _norm_name(nom)
+    def _norm(v):
+        s = unicodedata.normalize("NFD", str(v or "").lower())
+        return "".join(c for c in s if unicodedata.category(c) != "Mn")
+
+    def _words(v):
+        # mots alphanumériques (gère prénoms/noms composés : "Ait Hmid", "Ait-Hmid" -> ["ait","hmid"])
+        return [w for w in re.split(r"[^a-z0-9]+", _norm(v)) if w]
+
+    p_words = _words(prenom)
+    n_words = _words(nom)
+    p_full = "".join(p_words)
+    n_full = "".join(n_words)
     pi, ni = p_full[:1], n_full[:1]
 
-    # séparateur présent dans la partie locale
-    sep = ""
-    for s in (".", "_", "-"):
-        if s in local:
-            sep = s
-            break
+    def _name_re(ws):
+        # les mots peuvent être collés OU séparés par . _ - dans l'email (ait-hmid, ait.hmid, aithmid)
+        return r"[._-]?".join(re.escape(w) for w in ws) if ws else None
 
-    # candidats (template, valeur) du plus spécifique au moins spécifique
-    candidates = [
-        ("{prenom}" + sep + "{nom}", p_full + sep + n_full),
-        ("{nom}" + sep + "{prenom}", n_full + sep + p_full),
-        ("{p}" + sep + "{nom}", pi + sep + n_full),
-        ("{nom}" + sep + "{p}", n_full + sep + pi),
-        ("{n}" + sep + "{prenom}", ni + sep + p_full),
-        ("{prenom}" + sep + "{n}", p_full + sep + ni),
-        ("{p}" + sep + "{n}", pi + sep + ni),
-        ("{n}" + sep + "{p}", ni + sep + pi),
-        ("{prenom}", p_full),
-        ("{nom}", n_full),
-    ]
-    for template, value in candidates:
-        if value and value == local:
-            return template + "@" + domain
+    result = local
+    placed = {"p": False, "n": False}
 
-    # Inférence par position : local-part "A<sep>B" (2 segments alphabétiques).
-    # Si un seul côté matche un nom, on déduit l'autre comme le nom complémentaire.
-    if sep and local.count(sep) == 1:
-        a, b = local.split(sep, 1)
-        if re.fullmatch(r"[a-z]+", a) and re.fullmatch(r"[a-z]+", b):
-            def classify(seg):
-                if p_full and seg == p_full: return "{prenom}", "prenom"
-                if n_full and seg == n_full: return "{nom}", "nom"
-                if pi and seg == pi:         return "{p}", "prenom"
-                if ni and seg == ni:         return "{n}", "nom"
-                return None, None
-            ta, side_a = classify(a)
-            tb, side_b = classify(b)
-            if ta and tb:
-                return ta + sep + tb + "@" + domain
-            if ta and not tb:                                   # A reconnu -> B = complémentaire
-                tb = "{nom}" if side_a == "prenom" else "{prenom}"
-                return ta + sep + tb + "@" + domain
-            if tb and not ta:                                   # B reconnu -> A = complémentaire
-                ta = "{nom}" if side_b == "prenom" else "{prenom}"
-                return ta + sep + tb + "@" + domain
+    # 1) Remplacer les noms COMPLETS (le plus long d'abord pour éviter les chevauchements)
+    for k, ws, length in sorted(
+        [("n", n_words, len(n_full)), ("p", p_words, len(p_full))], key=lambda x: -x[2]
+    ):
+        rx = _name_re(ws)
+        if not rx:
+            continue
+        token = "{nom}" if k == "n" else "{prenom}"
+        new = re.sub(rx, token, result, count=1)
+        if new != result:
+            result = new
+            placed[k] = True
 
-    # fallback: remplacer les noms complets si présents, sinon garder tel quel
-    fallback = local
-    if p_full:
-        fallback = fallback.replace(p_full, "{prenom}")
-    if n_full:
-        fallback = fallback.replace(n_full, "{nom}")
-    return fallback + "@" + domain
+    # 2) Initiales : un segment d'UNE seule lettre égal à l'initiale (si le nom complet n'a pas été placé)
+    def _repl_initial(s, letter, token):
+        return re.sub(r"(?<![a-z0-9])" + re.escape(letter) + r"(?![a-z0-9])", token, s, count=1)
+
+    if not placed["p"] and pi:
+        new = _repl_initial(result, pi, "{p}")
+        if new != result:
+            result, placed["p"] = new, True
+    if not placed["n"] and ni:
+        new = _repl_initial(result, ni, "{n}")
+        if new != result:
+            result, placed["n"] = new, True
+
+    # 3) Inférence par position : "A<sep>B", un seul côté reconnu -> l'autre = complémentaire
+    #    (utile quand un prénom/nom est vide ou incohérent en base)
+    TOK = r"\{prenom\}|\{nom\}|\{p\}|\{n\}"
+    m = re.fullmatch(rf"({TOK}|[a-z0-9]+)([._-])({TOK}|[a-z0-9]+)", result)
+    if m:
+        a, sep, b = m.group(1), m.group(2), m.group(3)
+        a_t, b_t = a.startswith("{"), b.startswith("{")
+        if a_t ^ b_t:  # exactement un côté est un token
+            if a_t:
+                result = a + sep + ("{nom}" if a in ("{prenom}", "{p}") else "{prenom}")
+            else:
+                result = ("{nom}" if b in ("{prenom}", "{p}") else "{prenom}") + sep + b
+
+    return result + "@" + domain
 
 def AddSoc(societe: Societe, db: Session):
     """

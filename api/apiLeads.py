@@ -109,8 +109,9 @@ async def StagingDispatch(base:str,payload = Body(...), db: Session = Depends(ge
         r4 = SP.CompleteSocieteFromEmail(db,base)
         result.update(r4)
 
-        r5 = SP.CompleteNomPrenomFromEmail(db,base)
-        result.update(r5)
+        # Complétion nom/prénom depuis l'email -> DÉSACTIVÉE (valeurs devinées peu fiables)
+        # r5 = SP.CompleteNomPrenomFromEmail(db,base)
+        # result.update(r5)
 
         #r_soc = Ss.AddAuto(db, base)
         #result.update(r_soc)
