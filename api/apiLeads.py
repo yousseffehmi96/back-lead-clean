@@ -139,6 +139,9 @@ async def StagingDispatch(base:str,payload = Body(...), db: Session = Depends(ge
         # (après nettoyage/complétion/déduplication) vers staging_leads.
         # StagingToSteagingApplique insère tout depuis {base} puis vide {base}.
         if base == "import_leads":
+            # Contacts trop incomplets (email+société vides, ou >=3 champs vides) -> Clean
+            result.update(SP.MoveIncompleteToClean(db, base))
+            # Le reste -> Staging (ex-applique)
             r9 = SP.StagingToSteagingApplique(db, base)
             result.update(r9)
         # --- Tri par tables finales (à réactiver plus tard) ---

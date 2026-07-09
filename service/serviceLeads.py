@@ -890,6 +890,53 @@ def StagingToSilver(db: Session,base:str):
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Erreur inattendue : {str(e)}")
+def MoveIncompleteToClean(db: Session, base: str = "import_leads"):
+    """
+    Déplace vers cleaning_leads (À corriger) les contacts trop incomplets :
+      - email vide ET société vide (impossible de générer/vérifier un email), OU
+      - au moins 3 champs vides parmi {nom, prénom, email, société}.
+    Les retire de {base}.
+    """
+    def _empty(col):
+        return f"LOWER(TRIM(COALESCE({col}, ''))) IN ('', 'nan', 'none', 'null')"
+
+    def _cond(pfx=""):
+        e, s = _empty(pfx + "email"), _empty(pfx + "societe")
+        n, p = _empty(pfx + "nom"), _empty(pfx + "prenom")
+        cnt = (f"((CASE WHEN {n} THEN 1 ELSE 0 END) + (CASE WHEN {p} THEN 1 ELSE 0 END)"
+               f" + (CASE WHEN {e} THEN 1 ELSE 0 END) + (CASE WHEN {s} THEN 1 ELSE 0 END))")
+        return f"(({e} AND {s}) OR {cnt} >= 3)"
+
+    try:
+        result = db.execute(text(f"""
+            INSERT INTO cleaning_leads (nom, prenom, email, fonction, societe, telephone, linkedin, location)
+            SELECT sl.nom, sl.prenom, sl.email, sl.fonction, sl.societe, sl.telephone, sl.linkedin, sl.location
+            FROM {base} sl
+            WHERE {_cond('sl.')}
+              AND NOT EXISTS (
+                    SELECT 1 FROM cleaning_leads cl
+                    WHERE COALESCE(cl.nom, '') = COALESCE(sl.nom, '')
+                      AND COALESCE(cl.prenom, '') = COALESCE(sl.prenom, '')
+                      AND COALESCE(cl.email, '') = COALESCE(sl.email, '')
+                      AND COALESCE(cl.societe, '') = COALESCE(sl.societe, '')
+                      AND COALESCE(cl.telephone, '') = COALESCE(sl.telephone, '')
+                      AND COALESCE(cl.linkedin, '') = COALESCE(sl.linkedin, '')
+                      AND COALESCE(cl.location, '') = COALESCE(sl.location, '')
+              )
+        """))
+        moved = result.rowcount or 0
+        db.execute(text(f"DELETE FROM {base} WHERE {_cond('')}"))
+        db.commit()
+        print(f"✅ {moved} contacts incomplets -> Clean")
+        return {"moved_to_clean": int(moved)}
+    except SQLAlchemyError as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Erreur base de données : {str(e)}")
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Erreur inattendue : {str(e)}")
+
+
 def StagingToClean(db: Session):
     try:
         # 1️⃣ Inserer les leads dont nom ou prenom reste vide
