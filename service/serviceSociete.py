@@ -32,6 +32,10 @@ def derive_patterne(email, prenom, nom) -> str:
         return e
     local, domain = e.split("@", 1)
     local = re.sub(r"\s+", "", local)
+    # Nettoyage des séparateurs parasites : doublons ("a..b"->"a.b") + tête/queue (".a."->"a")
+    local = re.sub(r"([._-])[._-]+", r"\1", local)
+    local = local.strip("._-")
+    domain = domain.strip(".")
 
     p_full = _norm_name(prenom)
     n_full = _norm_name(nom)
@@ -122,7 +126,7 @@ def AddSoc(societe: Societe, db: Session):
 def AddAuto(db: Session, base: str):
     """
     Ajoute automatiquement les sociétés manquantes depuis une table de leads.
-    (ex: staging_leads, silver_leads, etc.)
+    (ex: import_leads, silver_leads, etc.)
     """
     try:
         # Un représentant par société (priorité aux lignes avec prénom ET nom non vides).

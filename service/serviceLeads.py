@@ -35,6 +35,11 @@ import imaplib
 import email
 import time
 import uuid
+import socket
+import threading
+import dns.resolver
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from database.db import SessionLocal
 def _norm_company_key(v: str | None) -> str:
     if not v:
         return ""
@@ -67,7 +72,7 @@ def _build_email(patterne: str, prenom: str, nom: str) -> str:
 
 def SteagingAppliqueToSilver(db: Session, ids: list[int], pattern: str | None = None):
     """
-    Déplace une sélection de steaging_applique vers silver_leads.
+    Déplace une sélection de staging_leads vers silver_leads.
     Conditions:
     - société existe dans societe_leads (match par nom "normalisé")
     - on génère l'email si manquant (pattern + domaine/ext de la société)
@@ -110,7 +115,7 @@ def SteagingAppliqueToSilver(db: Session, ids: list[int], pattern: str | None = 
                 e = (email_val or "").strip().lower()
                 if e and e not in ("nan", "none", "null"):
                     res = db.execute(text("""
-                        DELETE FROM steaging_applique
+                        DELETE FROM staging_leads
                         WHERE id <> :id
                           AND LOWER(TRIM(COALESCE(email,''))) = :email
                     """), {"id": lid, "email": e})
@@ -124,7 +129,7 @@ def SteagingAppliqueToSilver(db: Session, ids: list[int], pattern: str | None = 
                     return
                 rows = db.execute(text("""
                     SELECT id, nom, prenom, societe
-                    FROM steaging_applique
+                    FROM staging_leads
                     WHERE id <> :id
                 """), {"id": lid}).mappings().all()
                 to_delete = []
@@ -132,7 +137,7 @@ def SteagingAppliqueToSilver(db: Session, ids: list[int], pattern: str | None = 
                     if _norm_name_part(r.get("nom")) == n and _norm_name_part(r.get("prenom")) == p and _norm_company_key(r.get("societe")) == s:
                         to_delete.append(r.get("id"))
                 if to_delete:
-                    res = db.execute(text("DELETE FROM steaging_applique WHERE id = ANY(:ids)"), {"ids": to_delete})
+                    res = db.execute(text("DELETE FROM staging_leads WHERE id = ANY(:ids)"), {"ids": to_delete})
                     deleted_duplicates += int(res.rowcount or 0)
             except Exception:
                 return
@@ -176,7 +181,7 @@ def SteagingAppliqueToSilver(db: Session, ids: list[int], pattern: str | None = 
                 # unique constraint: skip si existe déjà
                 exists = db.query(Silver_leads.id).filter(Silver_leads.email == email).first()
                 if exists:
-                    # L'utilisateur veut que ce lead disparaisse de steaging_applique
+                    # L'utilisateur veut que ce lead disparaisse de staging_leads
                     db.delete(l)
                     deleted_already_in_silver += 1
                     deleted_ids.append(int(l.id))
@@ -193,6 +198,7 @@ def SteagingAppliqueToSilver(db: Session, ids: list[int], pattern: str | None = 
                     telephone=l.telephone,
                     linkedin=l.linkedin,
                     location=l.location,
+                    statu=getattr(l, "statu", None),   # report du statut vérifié en Applique
                 )
                 db.add(obj)
                 db.delete(l)
@@ -267,13 +273,13 @@ def ExportDatabaseZip(db: Session, is_manager: bool):
     # Liste blanche des tables à exporter
     tables = [
         "societe_leads",
-        "staging_leads",
+        "import_leads",
         "staging_import_history",
         "cleaning_leads",
         "silver_leads",
         "gold_leads",
         "blacklist_leads",
-        "steaging_applique",
+        "staging_leads",
         "statistic_leads",
         "validation_rule",
         "token",
@@ -337,7 +343,7 @@ def ExportDatabaseZip(db: Session, is_manager: bool):
 
 def CountLastImportAlreadyProcessedInApplique(db: Session, filename: str, userid: str, inserted_rows: int) -> int:
     """
-    Compte combien de lignes du dernier import (history) existent déjà dans steaging_applique.
+    Compte combien de lignes du dernier import (history) existent déjà dans staging_leads.
     Matching prioritaire par email (non vide), sinon par (nom, prenom, societe).
     """
     if not filename or not userid or inserted_rows <= 0:
@@ -365,12 +371,12 @@ def CountLastImportAlreadyProcessedInApplique(db: Session, filename: str, userid
             FROM normalized li
             WHERE (
                 (li.email_n <> '' AND li.email_n <> 'nan' AND EXISTS (
-                    SELECT 1 FROM steaging_applique sa
+                    SELECT 1 FROM staging_leads sa
                     WHERE LOWER(TRIM(COALESCE(sa.email, ''))) = li.email_n
                 ))
                 OR
                 ((li.email_n = '' OR li.email_n = 'nan') AND EXISTS (
-                    SELECT 1 FROM steaging_applique sa
+                    SELECT 1 FROM staging_leads sa
                     WHERE LOWER(TRIM(COALESCE(sa.nom, ''))) = li.nom_n
                       AND LOWER(TRIM(COALESCE(sa.prenom, ''))) = li.prenom_n
                       AND LOWER(TRIM(COALESCE(sa.societe, ''))) = li.societe_n
@@ -892,7 +898,7 @@ def StagingToClean(db: Session):
             INSERT INTO cleaning_leads (nom, prenom, email, fonction, societe, telephone, linkedin, location)
             SELECT
                 nom, prenom, email, fonction, societe, telephone, linkedin, location
-            FROM staging_leads sl
+            FROM import_leads sl
             WHERE (
                     LOWER(TRIM(COALESCE(sl.nom, ''))) IN ('', 'nan')
                     OR LOWER(TRIM(COALESCE(sl.prenom, ''))) IN ('', 'nan')
@@ -915,7 +921,7 @@ def StagingToClean(db: Session):
         
         # Supprimer uniquement les leads de staging qui matchent la règle clean
         db.execute(text("""
-            DELETE FROM staging_leads
+            DELETE FROM import_leads
             WHERE (
                     LOWER(TRIM(COALESCE(nom, ''))) IN ('', 'nan')
                     OR LOWER(TRIM(COALESCE(prenom, ''))) IN ('', 'nan')
@@ -939,7 +945,7 @@ def StagingToClean(db: Session):
 def StagingToSteagingApplique(db: Session, base: str):
     try:
         result = db.execute(text(f"""
-            INSERT INTO steaging_applique (nom, prenom, email, fonction, societe, telephone, linkedin, location)
+            INSERT INTO staging_leads (nom, prenom, email, fonction, societe, telephone, linkedin, location)
             SELECT nom, prenom, email, fonction, societe, telephone, linkedin, location
             FROM {base}
         """))
@@ -1655,6 +1661,110 @@ def Rephrase(db: Session, base: str = "silver_leads"):
 
 
 
+# ---------------------------------------------------------------------------
+# Vérification d'email par sonde SMTP RCPT (sans envoyer d'email)
+# ---------------------------------------------------------------------------
+_MX_CACHE: dict = {}          # domaine -> [hosts MX] (ou None si aucun)
+_CATCHALL_CACHE: dict = {}    # domaine -> bool (accept-all)
+_MX_LOCK = threading.Lock()
+
+
+def _sender_domain() -> str:
+    u = os.getenv("SMTP_HELO_DOMAIN") or os.getenv("SMTP_USER") or "example.com"
+    return u.split("@")[-1].strip() or "example.com"
+
+
+def _resolve_mx(domain: str):
+    """Retourne la liste des hosts MX (par priorité), fallback A record. Caché."""
+    with _MX_LOCK:
+        if domain in _MX_CACHE:
+            return _MX_CACHE[domain]
+    hosts = None
+    try:
+        recs = dns.resolver.resolve(domain, "MX")
+        hosts = [str(r.exchange).rstrip(".") for r in sorted(recs, key=lambda r: r.preference)]
+    except Exception:
+        try:
+            dns.resolver.resolve(domain, "A")
+            hosts = [domain]   # pas de MX -> le domaine lui-même
+        except Exception:
+            hosts = None
+    with _MX_LOCK:
+        _MX_CACHE[domain] = hosts
+    return hosts
+
+
+def _rcpt_code(mx_host: str, sender_domain: str, target: str, timeout: int) -> int:
+    """Ouvre une session SMTP vers le MX et renvoie le code RCPT TO (ou 0 si injoignable)."""
+    try:
+        with smtplib.SMTP(mx_host, 25, timeout=timeout) as smtp:
+            smtp.ehlo(sender_domain)
+            smtp.mail(f"probe@{sender_domain}")
+            code, _ = smtp.rcpt(target)
+            smtp.quit()
+            return int(code)
+    except (smtplib.SMTPServerDisconnected, smtplib.SMTPConnectError, socket.error, OSError):
+        return 0
+    except smtplib.SMTPException:
+        return 0
+
+
+def _is_catch_all(mx_host: str, sender_domain: str, domain: str, timeout: int) -> bool:
+    """Le domaine accepte-t-il n'importe quelle adresse ? (caché par domaine)"""
+    with _MX_LOCK:
+        if domain in _CATCHALL_CACHE:
+            return _CATCHALL_CACHE[domain]
+    probe = f"nonexistent-{uuid.uuid4().hex[:12]}@{domain}"
+    code = _rcpt_code(mx_host, sender_domain, probe, timeout)
+    catchall = code in (250, 251)
+    with _MX_LOCK:
+        _CATCHALL_CACHE[domain] = catchall
+    return catchall
+
+
+def smtp_probe(email_addr: str, timeout: int = 8) -> dict:
+    """
+    Vérifie une adresse via RCPT TO (aucun email envoyé).
+    code: 250 = valide/livrable, 550 = invalide, 450 = inconnu (greylist/catch-all/injoignable).
+    """
+    addr = str(email_addr or "").strip().lower()
+    if "@" not in addr:
+        return {"email": addr, "code": 550, "status": "❌ format invalide"}
+    domain = addr.split("@", 1)[1]
+    hosts = _resolve_mx(domain)
+    if not hosts:
+        return {"email": addr, "code": 450, "status": "⚠️ domaine sans MX"}
+
+    sender = _sender_domain()
+    for mx in hosts[:2]:   # essaie les 2 premiers MX
+        code = _rcpt_code(mx, sender, addr, timeout)
+        if code == 0:
+            continue       # MX injoignable -> essayer le suivant
+        if code in (250, 251):
+            # Domaine accept-all ? -> on ne peut pas conclure "valide"
+            if _is_catch_all(mx, sender, domain, timeout):
+                return {"email": addr, "code": 450, "status": "⚠️ domaine catch-all"}
+            return {"email": addr, "code": 250, "status": "✅ adresse acceptée"}
+        if code in (550, 551, 553, 554):
+            return {"email": addr, "code": 550, "status": "❌ adresse rejetée"}
+        if 400 <= code < 500:
+            return {"email": addr, "code": 450, "status": "⚠️ temporaire (greylist)"}
+    return {"email": addr, "code": 450, "status": "⚠️ MX injoignable"}
+
+
+def _apply_statu(db: Session, to_email: str, statu: str):
+    """Met à jour le statut sur silver/gold (par email) + tous les leads applique correspondants."""
+    lead = db.query(Silver_leads).filter(Silver_leads.email == to_email).first()
+    if not lead:
+        lead = db.query(Gold_leads).filter(Gold_leads.email == to_email).first()
+    if lead:
+        lead.statu = statu
+    db.query(SteagingApplique).filter(SteagingApplique.email == to_email).update(
+        {SteagingApplique.statu: statu}, synchronize_session=False
+    )
+    db.commit()
+
+
 def send_email(to_email: str, message_id: str) -> bool:
     """
     Envoie un vrai email à l'adresse donnée.
@@ -1717,65 +1827,97 @@ def check_bounce(message_id: str, to_email: str) -> dict | None:
  
  
 def send_and_check(to_email: str, db: Session = None) -> dict:
-    message_id = str(uuid.uuid4()) + "@check"
-
-    # 1. Envoie le mail
-    try:
-        send_email(to_email, message_id)
-    except smtplib.SMTPRecipientsRefused as e:
-        code, reason = list(e.recipients.values())[0]
-        return {
-            "email":  to_email,
-            "status": "❌ refusé immédiatement",
-            "code":   code,
-            "raison": reason.decode() if isinstance(reason, bytes) else reason
-        }
-    except Exception as e:
-        return {"email": to_email, "status": "⚠️ erreur SMTP", "raison": str(e)}
-
-    # 2. Vérifie toutes les 5s pendant max 10s
-    for i in range(2):          # 2 × 5s = 10s max
-        time.sleep(5)
-        print(f"[{(i+1)*5}s] Vérification bounce pour {to_email}...")
-
-        bounce = check_bounce(message_id, to_email)
-        if bounce:
-            print("lena")
-            if db:
-                lead = db.query(Silver_leads).filter(Silver_leads.email == to_email).first()
-                if not lead:
-                    lead = db.query(Gold_leads).filter(Gold_leads.email == to_email).first()
-                if lead:
-                    lead.statu = "non disponible"
-                db.query(SteagingApplique).filter(SteagingApplique.email == to_email).update(
-                    {SteagingApplique.statu: "non disponible"}, synchronize_session=False
-                )
-                db.commit()
-            return {
-                "email":  to_email,
-                "status": "❌ bounce — adresse introuvable",
-                "code":   550,
-                "raison": bounce["subject"],
-                "detail": bounce["body"]
-            }
-
-    # 3. Aucun bounce après 10s → considéré livré
+    """
+    Vérifie une adresse via sonde SMTP RCPT (aucun email envoyé, aucune attente).
+    Met à jour le statut (silver/gold/applique) : 250 -> disponible, sinon -> non disponible.
+    """
+    res = smtp_probe(to_email)
+    is_valid = int(res.get("code", 0) or 0) == 250
+    statu = "disponible" if is_valid else "non disponible"
     if db:
-        lead = db.query(Silver_leads).filter(Silver_leads.email == to_email).first()
-        if not lead:
-            lead = db.query(Gold_leads).filter(Gold_leads.email == to_email).first()
-        if lead:
-            lead.statu = "disponible"
-        db.query(SteagingApplique).filter(SteagingApplique.email == to_email).update(
-            {SteagingApplique.statu: "disponible"}, synchronize_session=False
-        )
-        db.commit()
+        _apply_statu(db, to_email, statu)
     return {
         "email":  to_email,
-        "status": "✅ livré (pas de bounce)",
-        "code":   250,
-        "raison": "Aucun bounce reçu après 10s"
+        "status": res.get("status", ""),
+        "code":   res.get("code", 0),
+        "raison": res.get("status", ""),
     }
+
+
+# ---------------------------------------------------------------------------
+# Vérification en masse — tâche de fond concurrente avec suivi de progression
+# ---------------------------------------------------------------------------
+VERIFY_JOBS: dict = {}
+_JOBS_LOCK = threading.Lock()
+_VERIFY_WORKERS = 100
+
+
+def _verify_lead_task(lead_id: int, company_map: dict) -> str:
+    """Vérifie un lead applique dans sa propre session ; renvoie le statut final."""
+    db = SessionLocal()
+    try:
+        lead = db.query(SteagingApplique).filter(SteagingApplique.id == lead_id).first()
+        if not lead:
+            return "introuvable"
+        res = _verify_one_applique(db, lead, dict(company_map))
+        return res.get("statu", "non disponible")
+    except Exception:
+        db.rollback()
+        return "erreur"
+    finally:
+        db.close()
+
+
+def _run_verify_job(job_id: str, ids: list):
+    # snapshot du map société (lecture unique)
+    db0 = SessionLocal()
+    try:
+        company_map = _company_map_regex_patterne(db0)
+    finally:
+        db0.close()
+
+    try:
+        with ThreadPoolExecutor(max_workers=_VERIFY_WORKERS) as pool:
+            futures = {pool.submit(_verify_lead_task, i, company_map): i for i in ids}
+            for fut in as_completed(futures):
+                statu = fut.result()
+                with _JOBS_LOCK:
+                    job = VERIFY_JOBS.get(job_id)
+                    if not job:
+                        continue
+                    job["done"] += 1
+                    if statu == "disponible":
+                        job["disponible"] += 1
+                    elif statu == "non disponible":
+                        job["non_disponible"] += 1
+                    else:
+                        job["erreurs"] += 1
+    finally:
+        with _JOBS_LOCK:
+            if job_id in VERIFY_JOBS:
+                VERIFY_JOBS[job_id]["status"] = "done"
+
+
+def start_verify_job(ids: list) -> dict:
+    ids = [int(i) for i in (ids or []) if str(i).strip() != ""]
+    job_id = uuid.uuid4().hex
+    with _JOBS_LOCK:
+        VERIFY_JOBS[job_id] = {
+            "status": "running", "total": len(ids), "done": 0,
+            "disponible": 0, "non_disponible": 0, "erreurs": 0,
+        }
+    if ids:
+        threading.Thread(target=_run_verify_job, args=(job_id, ids), daemon=True).start()
+    else:
+        with _JOBS_LOCK:
+            VERIFY_JOBS[job_id]["status"] = "done"
+    return {"job_id": job_id, "total": len(ids)}
+
+
+def get_verify_job(job_id: str) -> dict:
+    with _JOBS_LOCK:
+        job = VERIFY_JOBS.get(job_id)
+        return dict(job) if job else {"status": "unknown"}
 
 
 def _company_map_regex_patterne(db: Session):
@@ -1851,56 +1993,52 @@ def _autoadd_societe_from_email(db: Session, nom_soc: str, email: str, prenom, n
 def _verify_one_applique(db: Session, lead, company_map: dict) -> dict:
     """
     Flux de vérification d'un lead applique (supporte plusieurs patternes par société) :
-    1) On teste l'email actuel (SMTP).
+    1) Société connue ? -> on génère et teste CHAQUE patterne (RCPT) ;
+       le 1er livré -> on met cet email + disponible.
+    2) Sinon (aucun patterne livré, ou société inconnue) -> on teste l'email ACTUEL du lead ;
        - livré -> disponible + auto-ajout/enrichissement société (patterne + regex dérivés).
-    2) Sinon, société connue ? sinon -> non disponible.
-    3) On génère et teste CHAQUE patterne de la société (en évitant de retester le même email) ;
-       le 1er livré -> on CHANGE l'email + disponible ; si aucun -> non disponible.
+    3) Rien de livrable -> non disponible.
     """
     email = (lead.email or "").strip().lower()
     nom_soc = (lead.societe or "").strip()
     key = _norm_company_key(nom_soc)
     tested = set()
 
-    # 1) Test SMTP de l'email actuel
-    if email and "@" in email:
+    # 1) Société connue -> essayer chaque patterne d'abord
+    _regex, patterne_raw = company_map.get(key, ("", ""))
+    patternes = _split_lines(patterne_raw)
+    if patternes:
+        p = _norm_name_part(lead.prenom)
+        n = _norm_name_part(lead.nom)
+        for patt in patternes:
+            gen = _build_email(patt, p, n)
+            gen = (NettoyerUnEmail(gen) or gen or "").strip().lower()
+            if not gen or "@" not in gen or "{" in gen or gen in tested:
+                continue
+            tested.add(gen)
+            r = send_and_check(gen, db)
+            if int(r.get("code", 0) or 0) == 250:
+                lead.email = gen           # patterne livré -> on le sauvegarde
+                lead.statu = "disponible"
+                db.commit()
+                return {"id": lead.id, "email": gen, "statu": "disponible",
+                        "regenerated": True, "code": 250, "patterne": patt}
+
+    # 2) Aucun patterne livré (ou société inconnue) -> tester l'email actuel du lead
+    if email and "@" in email and email not in tested:
         r1 = send_and_check(email, db)
         tested.add(email)
         if int(r1.get("code", 0) or 0) == 250:
             lead.statu = "disponible"
             db.commit()
+            # Email actuel livré -> on apprend la société (patterne + regex dérivés de cet email)
             added = _autoadd_societe_from_email(db, nom_soc, email, lead.prenom, lead.nom)
             if added and key:
                 company_map[key] = added  # (regex, patterne) rafraîchis
             return {"id": lead.id, "email": email, "statu": "disponible",
                     "regenerated": False, "code": 250, "societe_added": bool(added)}
 
-    # 2) Société connue ?
-    _regex, patterne_raw = company_map.get(key, ("", ""))
-    patternes = _split_lines(patterne_raw)
-    if not patternes:
-        lead.statu = "non disponible"
-        db.commit()
-        return {"id": lead.id, "email": email, "statu": "non disponible",
-                "regenerated": False, "reason": "societe_inconnue"}
-
-    # 3) Essayer chaque patterne jusqu'à un email livrable
-    p = _norm_name_part(lead.prenom)
-    n = _norm_name_part(lead.nom)
-    for patt in patternes:
-        gen = _build_email(patt, p, n)
-        gen = (NettoyerUnEmail(gen) or gen or "").strip().lower()
-        if not gen or "@" not in gen or "{" in gen or gen in tested:
-            continue
-        tested.add(gen)
-        r = send_and_check(gen, db)
-        if int(r.get("code", 0) or 0) == 250:
-            lead.email = gen           # email livré -> on le sauvegarde
-            lead.statu = "disponible"
-            db.commit()
-            return {"id": lead.id, "email": gen, "statu": "disponible",
-                    "regenerated": True, "code": 250, "patterne": patt}
-
+    # 3) Rien de livrable
     lead.statu = "non disponible"
     db.commit()
     return {"id": lead.id, "email": email, "statu": "non disponible", "regenerated": False}
@@ -1926,3 +2064,28 @@ def VerifyAppliqueBulk(db: Session, ids: list) -> dict:
         except Exception as e:
             results.append({"id": lead.id, "statu": "erreur", "reason": str(e)})
     return {"results": results, "verified": len(results)}
+
+
+def GenerateAppliqueEmail(db: Session, lead_id: int) -> dict:
+    """
+    Génère l'email d'un lead applique depuis le 1er patterne de sa société et le sauvegarde.
+    PAS de vérification SMTP, PAS d'envoi vers Silver — simple remplissage.
+    """
+    lead = db.query(SteagingApplique).filter(SteagingApplique.id == lead_id).first()
+    if not lead:
+        raise HTTPException(status_code=404, detail="Lead introuvable")
+
+    nom_soc = (lead.societe or "").strip()
+    soc = db.query(societeleads).filter(societeleads.nom.ilike(nom_soc)).first() if nom_soc else None
+    patternes = _split_lines(soc.patterne) if soc else []
+    if not patternes:
+        return {"id": lead.id, "email": lead.email, "error": "societe_inconnue"}
+
+    gen = _build_email(patternes[0], _norm_name_part(lead.prenom), _norm_name_part(lead.nom))
+    gen = (NettoyerUnEmail(gen) or gen or "").strip().lower()
+    if not gen or "@" not in gen or "{" in gen:
+        return {"id": lead.id, "email": lead.email, "error": "generation_impossible"}
+
+    lead.email = gen
+    db.commit()
+    return {"id": lead.id, "email": gen}

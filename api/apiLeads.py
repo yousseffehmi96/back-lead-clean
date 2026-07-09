@@ -20,10 +20,10 @@ def download_leads(types:str,db: Session = Depends(get_db)):
 @router.get("/download-leads-xlsx/{types}")
 def download_leads(types:str,db: Session = Depends(get_db)):
         return SP.DownloadLeadXlsx(types,db)
-@router.get("/staging/download-last-import-csv")
+@router.get("/import/download-last-import-csv")
 def download_last_staging_csv(userid: str, db: Session = Depends(get_db)):
         return SP.DownloadLatestStagingImportCSV(db, userid)
-@router.get("/staging/download-last-import-xlsx")
+@router.get("/import/download-last-import-xlsx")
 def download_last_staging_xlsx(userid: str, db: Session = Depends(get_db)):
         return SP.DownloadLatestStagingImportXlsx(db, userid)
 @router.post("/toblack/{id}")
@@ -40,11 +40,11 @@ async def DeleteClean(payload = Body(...), db: Session = Depends(get_db)):
         if isinstance(payload, dict):
                 ids = payload.get("ids") or []
         return SP.DeleteCleanByIds(db, ids=ids)
-@router.get("/steaging-applique")
+@router.get("/staging")
 async def GetAllSteagingApplique(db: Session = Depends(get_db)):
         return SP.GetAllSteagingApplique(db)
 
-@router.post("/steaging-applique/to-silver")
+@router.post("/staging/to-silver")
 async def SteagingAppliqueToSilver(payload = Body(...), db: Session = Depends(get_db)):
         ids = []
         pattern = None
@@ -53,14 +53,22 @@ async def SteagingAppliqueToSilver(payload = Body(...), db: Session = Depends(ge
                 pattern = payload.get("pattern")
         return SP.SteagingAppliqueToSilver(db, ids=ids, pattern=pattern)
 
-@router.post("/steaging-applique/verify/{id}")
+@router.post("/staging/verify/{id}")
 def verify_applique_lead(id: int, db: Session = Depends(get_db)):
         return SP.VerifyAppliqueLead(db, id)
 
-@router.post("/steaging-applique/verify-bulk")
-def verify_applique_bulk(payload = Body(...), db: Session = Depends(get_db)):
+@router.post("/staging/generate/{id}")
+def generate_applique_email(id: int, db: Session = Depends(get_db)):
+        return SP.GenerateAppliqueEmail(db, id)
+
+@router.post("/staging/verify-bulk")
+def verify_applique_bulk(payload = Body(...)):
         ids = payload.get("ids") or [] if isinstance(payload, dict) else []
-        return SP.VerifyAppliqueBulk(db, ids)
+        return SP.start_verify_job(ids)
+
+@router.get("/staging/verify-status/{job_id}")
+def verify_applique_status(job_id: str):
+        return SP.get_verify_job(job_id)
 
 @router.get("/staging-import-history")
 async def GetStagingImportHistory(userid: str | None = None, is_manager: bool = False, db: Session = Depends(get_db)):
@@ -127,9 +135,9 @@ async def StagingDispatch(base:str,payload = Body(...), db: Session = Depends(ge
         db.expire_all()
 
         # Tri Gold/Silver/Clean désactivé pour le moment : on ramène TOUS les leads
-        # (après nettoyage/complétion/déduplication) vers steaging_applique.
+        # (après nettoyage/complétion/déduplication) vers staging_leads.
         # StagingToSteagingApplique insère tout depuis {base} puis vide {base}.
-        if base == "staging_leads":
+        if base == "import_leads":
             r9 = SP.StagingToSteagingApplique(db, base)
             result.update(r9)
         # --- Tri par tables finales (à réactiver plus tard) ---
@@ -240,7 +248,7 @@ async def update_silver_email(id: int, payload = Body(...), db: Session = Depend
     return SP.UpdateSilverEmail(db, id, str(email or ""))
 @router.get("/teste/lead")
 def faire(db:Session = Depends(get_db)):
-    SP.Rephrase(db,"staging_leads")
+    SP.Rephrase(db,"import_leads")
 
 
 @router.get("/send/{email}")

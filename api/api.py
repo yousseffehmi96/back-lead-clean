@@ -30,7 +30,7 @@ async def Upload(userid: str = Form(...), username: str | None = Form(None), fil
     print("hethi static")
     print("kikiki")
     SaveStatic(db,static)
-    # Check: fichier déjà traité (doublons vs steaging_applique) dès l'import
+    # Check: fichier déjà traité (doublons vs staging_leads) dès l'import
     try:
         inserted_rows = int(stats.get("inserted_rows", 0) or 0)
         already_processed = sp.CountLastImportAlreadyProcessedInApplique(db, file.filename, userid, inserted_rows)
@@ -46,7 +46,7 @@ async def Upload(userid: str = Form(...), username: str | None = Form(None), fil
 @Router.post("/upload-mapped")
 async def UploadMapped(payload=Body(...), db: Session = Depends(get_db)):
     """Insère des lignes déjà mappées côté front (mapping manuel des colonnes)
-    dans staging_leads, exactement comme /upload le fait pour un fichier."""
+    dans import_leads, exactement comme /upload le fait pour un fichier."""
     rows = payload.get("rows") or []
     userid = str(payload.get("userid") or "")
     username = payload.get("username")
@@ -82,7 +82,7 @@ async def UploadMapped(payload=Body(...), db: Session = Depends(get_db)):
 
 
 
-@Router.get("/staging")
+@Router.get("/import")
 async def StagingLeads(db: Session = Depends(get_db)):
         """LoadFileToBd(file, db)"""
         return sp.GetAllStaging(db)

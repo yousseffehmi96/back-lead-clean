@@ -193,7 +193,7 @@ def LoadFileToBd(file: UploadFile, db: Session, userid: Optional[str] = None, us
         # 🚀 Insertion ultra-rapide
         engine = db.get_bind()
         df_clean.to_sql(
-            name='staging_leads',
+            name='import_leads',
             con=engine,
             if_exists='append',
             index=False,
@@ -236,7 +236,7 @@ def LoadFileToBd(file: UploadFile, db: Session, userid: Optional[str] = None, us
 
 
 def LoadRowsToBd(rows, db: Session, userid: Optional[str] = None, username: Optional[str] = None, filename: Optional[str] = None):
-    """Insère des lignes déjà mappées (liste de dicts) dans staging_leads + historique.
+    """Insère des lignes déjà mappées (liste de dicts) dans import_leads + historique.
 
     Même logique de nettoyage / déduplication que LoadFileToBd, mais à partir de
     données JSON envoyées par le front (mapping manuel des colonnes)."""
@@ -288,7 +288,7 @@ def LoadRowsToBd(rows, db: Session, userid: Optional[str] = None, username: Opti
 
         engine = db.get_bind()
         df_clean.to_sql(
-            name='staging_leads',
+            name='import_leads',
             con=engine,
             if_exists='append',
             index=False,
@@ -327,7 +327,7 @@ def LoadRowsToBd(rows, db: Session, userid: Optional[str] = None, username: Opti
 
 def SupprimerDoublonsMemetABLE(db: Session, table: str):
     try:
-        allowed_tables = {"staging_leads", "cleaning_leads", "silver_leads"}
+        allowed_tables = {"import_leads", "cleaning_leads", "silver_leads"}
         if table not in allowed_tables:
             raise HTTPException(status_code=400, detail=f"Table '{table}' non autorisée.")
 
@@ -362,10 +362,10 @@ def SupprimerDoublons(db: Session):
         total_deleted = 0
 
         query_staging_silver = text("""
-            DELETE FROM staging_leads
+            DELETE FROM import_leads
             WHERE id IN (
                 SELECT s.id
-                FROM staging_leads s
+                FROM import_leads s
                 INNER JOIN silver_leads sl ON 
                     COALESCE(s.email, '') = COALESCE(sl.email, '') AND
                     COALESCE(s.nom, '') = COALESCE(sl.nom, '') AND
@@ -380,10 +380,10 @@ def SupprimerDoublons(db: Session):
         print(f"✅ STAGING vs SILVER: {staging_vs_silver} doublons supprimés")
 
         query_staging_gold = text("""
-            DELETE FROM staging_leads
+            DELETE FROM import_leads
             WHERE id IN (
                 SELECT s.id
-                FROM staging_leads s
+                FROM import_leads s
                 INNER JOIN gold_leads g ON 
                     COALESCE(s.email, '') = COALESCE(g.email, '') AND
                     COALESCE(s.nom, '') = COALESCE(g.nom, '') AND
@@ -398,11 +398,11 @@ def SupprimerDoublons(db: Session):
         print(f"✅ STAGING vs GOLD: {staging_vs_gold} doublons supprimés")
 
         query_staging_applique = text("""
-            DELETE FROM staging_leads
+            DELETE FROM import_leads
             WHERE id IN (
                 SELECT s.id
-                FROM staging_leads s
-                INNER JOIN steaging_applique sa ON
+                FROM import_leads s
+                INNER JOIN staging_leads sa ON
                     COALESCE(s.email, '') = COALESCE(sa.email, '') AND
                     COALESCE(s.nom, '') = COALESCE(sa.nom, '') AND
                     COALESCE(s.prenom, '') = COALESCE(sa.prenom, '')
@@ -418,10 +418,10 @@ def SupprimerDoublons(db: Session):
 
         # 4️⃣ Supprimer doublons dans STAGING lui-même
         query_staging_internal = text("""
-            DELETE FROM staging_leads
+            DELETE FROM import_leads
             WHERE id NOT IN (
                 SELECT MIN(id)
-                FROM staging_leads
+                FROM import_leads
                 GROUP BY 
                     COALESCE(nom, ''),
                     COALESCE(prenom, ''),

@@ -11,6 +11,27 @@ from api.apiValidationRules import routes as validation_rules_router
 from service.serviceLeads import Rephrase
 from sqlalchemy import text
 app=FastAPI()
+
+# Migration idempotente (AVANT create_all) : renommage des tables
+#   staging_leads (brut import)   -> import_leads
+#   steaging_applique (travail)   -> staging_leads
+# Ordre strict : d'abord libérer le nom "staging_leads", puis y renommer l'applique.
+with engine.begin() as conn:
+    conn.execute(text("""
+        DO $$
+        BEGIN
+            IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name='staging_leads')
+               AND NOT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name='import_leads')
+               AND EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name='steaging_applique') THEN
+                ALTER TABLE staging_leads RENAME TO import_leads;
+            END IF;
+            IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name='steaging_applique')
+               AND NOT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name='staging_leads') THEN
+                ALTER TABLE steaging_applique RENAME TO staging_leads;
+            END IF;
+        END $$;
+    """))
+
 Base.metadata.create_all(bind=engine)
 
 # Migration idempotente: societe_leads (domaine, extension) -> patterne
@@ -37,7 +58,7 @@ with engine.begin() as conn:
     """))
 
 # Migration idempotente: colonnes de leads varchar(n) -> TEXT (évite "value too long")
-# Les données circulent depuis staging_leads (TEXT) vers ces tables.
+# Les données circulent depuis import_leads (TEXT) vers ces tables.
 with engine.begin() as conn:
     conn.execute(text("""
         DO $$
@@ -55,13 +76,22 @@ with engine.begin() as conn:
         END $$;
     """))
 
-# Migration idempotente: colonne statu sur steaging_applique (vérification email)
+# Migration idempotente: colonne statu sur staging_leads (vérification email)
 with engine.begin() as conn:
-    conn.execute(text("ALTER TABLE steaging_applique ADD COLUMN IF NOT EXISTS statu TEXT"))
+    conn.execute(text("ALTER TABLE staging_leads ADD COLUMN IF NOT EXISTS statu TEXT"))
 
 # Migration idempotente: colonne regex sur societe_leads (vérification du patterne)
 with engine.begin() as conn:
     conn.execute(text("ALTER TABLE societe_leads ADD COLUMN IF NOT EXISTS regex VARCHAR"))
+
+# Nettoyage idempotent des patternes: retirer un séparateur parasite avant '@'
+# (ex. "{prenom}.{nom}.@axians.com" -> "{prenom}.{nom}@axians.com")
+with engine.begin() as conn:
+    conn.execute(text(r"""
+        UPDATE societe_leads
+        SET patterne = regexp_replace(patterne, '[._-]+@', '@', 'g')
+        WHERE patterne ~ '[._-]+@'
+    """))
 
 app.include_router(api_router)
 app.include_router(societe_router)

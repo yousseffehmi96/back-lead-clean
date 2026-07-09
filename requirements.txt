@@ -13,3 +13,4 @@ anyio==4.12.1
 starlette==0.52.1
 typing-extensions==4.15.0
 tzdata==2025.3
+dnspython

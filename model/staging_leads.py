@@ -2,7 +2,7 @@ from sqlalchemy import Column, Integer, String, Text, TIMESTAMP, text
 from database.db import Base
 
 class StagingLeads(Base):
-    __tablename__ = "staging_leads"
+    __tablename__ = "import_leads"
    
     id = Column(Integer, primary_key=True, autoincrement=True)
     nom =  Column(Text, nullable=True)

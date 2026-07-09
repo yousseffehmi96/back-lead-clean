@@ -3,7 +3,7 @@ from database.db import Base
 
 
 class SteagingApplique(Base):
-    __tablename__ = "steaging_applique"
+    __tablename__ = "staging_leads"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     nom = Column(Text, nullable=True)
