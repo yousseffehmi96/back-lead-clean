@@ -19,7 +19,13 @@ def NetoyerUneChaine(text) -> str:
         if unicodedata.category(i) != "Mn":
             ch = ch + i
     
-    ch = re.sub(r'[^a-zA-Z0-9\s]', '', ch).strip()
+    # On conserve le trait d'union et l'apostrophe : ils font partie des noms
+    # ("Ait-Hmid", "Jean-Luc", "D'Angelo"). Les supprimer cassait la déduction
+    # du patterne société (aithmid ne matche pas ait-hmid dans l'email).
+    ch = re.sub(r"[^a-zA-Z0-9\s'-]", '', ch).strip()
+    # Nettoie les séparateurs isolés ou en trop (" - ", "--", tête/queue)
+    ch = re.sub(r"\s*-\s*", "-", ch)
+    ch = re.sub(r"([-'])[-']+", r"\1", ch).strip(" -'")
     
     if not ch:
         return None

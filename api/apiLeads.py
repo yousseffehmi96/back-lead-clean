@@ -5,11 +5,18 @@ from database.db import get_db
 from service.service import *
 import service.serviceSociete as Ss
 router=APIRouter()
+@router.get("/leads")
+async def GetAllLeads(db: Session = Depends(get_db)):
+        """Table unifiée (fusion Silver + Gold). La complétion n'est pas stockée :
+        le front la calcule à partir des 8 champs (100% => Gold)."""
+        return SP.GetAllLeads(db)
 @router.get("/silver")
 async def GetAllsilver(db: Session = Depends(get_db)):
+        """Rétro-compatible : vue filtrée des leads incomplets (< 100%)."""
         return SP.GetAllSilver(db)
 @router.get("/gold")
 async def GetAllGold(db: Session = Depends(get_db)):
+        """Rétro-compatible : vue filtrée des leads complets (Gold, 100%)."""
         return SP.GetAllGold(db)
 @router.get("/black")
 async def GetAllBlack(db: Session = Depends(get_db)):
@@ -186,11 +193,11 @@ async def complete_silver_email(payload = Body(...), db: Session = Depends(get_d
                 overwrite = bool(payload.get("overwrite"))
         else:
             pattern = payload
-        # 1) Appliquer le pattern sur silver_leads
-        result = CompleteEmail(db, "silver_leads", pattern=pattern, overwrite=overwrite)
+        # 1) Appliquer le pattern sur leads
+        result = CompleteEmail(db, "leads", pattern=pattern, overwrite=overwrite)
         # 2) Après application, enregistrer automatiquement les sociétés manquantes
-        # (si societe existe dans silver_leads mais pas encore dans societe_leads)
-        added = Ss.AddAuto(db, "silver_leads")
+        # (si societe existe dans leads mais pas encore dans societe_leads)
+        added = Ss.AddAuto(db, "leads")
         if isinstance(added, dict) and "added_societes" in added:
             result["added_societes"] = int(added.get("added_societes", 0) or 0)
         return result
@@ -211,7 +218,7 @@ async def preview_silver_email_collisions(
 ):
     result = PreviewEmailCollisions(
         db,
-        "silver_leads",
+        "leads",
         pattern=pattern,
         overwrite=overwrite,
         limit_emails=limit_emails,
@@ -251,6 +258,37 @@ async def update_silver_email(id: int, payload = Body(...), db: Session = Depend
     else:
         email = payload
     return SP.UpdateSilverEmail(db, id, str(email or ""))
+def _ids_du_payload(payload) -> list[int]:
+    ids = payload.get("ids") if isinstance(payload, dict) else None
+    return [int(i) for i in (ids or []) if str(i).lstrip("-").isdigit()]
+
+
+@router.post("/leads/export-csv")
+def export_leads_csv(payload = Body(...), db: Session = Depends(get_db)):
+    """Exporte exactement les leads envoyés par le front (ex: ceux à 100%).
+    La complétion étant calculée côté front, c'est lui qui fournit la sélection."""
+    return SP.DownloadProdLeadCSV("leads", db, ids=_ids_du_payload(payload))
+
+
+@router.post("/leads/export-xlsx")
+def export_leads_xlsx(payload = Body(...), db: Session = Depends(get_db)):
+    """Idem en XLSX."""
+    return SP.DownloadLeadXlsx("leads", db, ids=_ids_du_payload(payload))
+
+
+@router.put("/leads/{id}/field")
+async def update_lead_field(id: int, payload = Body(...), db: Session = Depends(get_db)):
+    """Édition inline d'un champ depuis le tableau Leads.
+    payload attendu : { "field": "telephone", "value": "0601..." }
+    Renvoie la nouvelle `completion` du lead (100 => Gold)."""
+    field = ""
+    value = None
+    if isinstance(payload, dict):
+        field = str(payload.get("field") or "")
+        value = payload.get("value")
+    return SP.UpdateLeadField(db, id, field, value)
+
+
 @router.get("/teste/lead")
 def faire(db:Session = Depends(get_db)):
     SP.Rephrase(db,"import_leads")
@@ -262,11 +300,9 @@ def send_get(email: str, db: Session = Depends(get_db)):
 
 @router.post("/send/bulk")
 def send_bulk(emails: list[str] = Body(...), db: Session = Depends(get_db)):
-    results = []
-    for email in emails:
-        result = SP.send_and_check(email, db)
-        results.append(result)
-    return results
+    # Envoie tout le lot puis attend une seule fois les bounces
+    # (une boucle sur send_and_check attendrait 20s par adresse).
+    return SP.send_and_check_bulk(emails, db)
 
 
 @router.get('/location/{base}')

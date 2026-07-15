@@ -51,9 +51,19 @@ def derive_patterne(email, prenom, nom) -> str:
     n_full = "".join(n_words)
     pi, ni = p_full[:1], n_full[:1]
 
-    def _name_re(ws):
+    def _name_variants(ws):
+        """Regex candidates pour un nom, du plus strict au plus tolérant."""
+        if not ws:
+            return []
         # les mots peuvent être collés OU séparés par . _ - dans l'email (ait-hmid, ait.hmid, aithmid)
-        return r"[._-]?".join(re.escape(w) for w in ws) if ws else None
+        variants = [r"[._-]?".join(re.escape(w) for w in ws)]
+        # Repli : le nom est stocké en un seul mot alors que l'email le sépare.
+        # Cas réel : "Ait-Hmid" nettoyé en "AitHmid" à l'import, mais l'email
+        # reste "ait-hmid" -> sans ce repli, {nom} n'est pas placé et le nom de
+        # la personne se retrouve figé en dur dans le patterne de la société.
+        if len(ws) == 1 and len(ws[0]) >= 4:
+            variants.append(r"[._-]?".join(re.escape(c) for c in ws[0]))
+        return variants
 
     result = local
     placed = {"p": False, "n": False}
@@ -62,14 +72,13 @@ def derive_patterne(email, prenom, nom) -> str:
     for k, ws, length in sorted(
         [("n", n_words, len(n_full)), ("p", p_words, len(p_full))], key=lambda x: -x[2]
     ):
-        rx = _name_re(ws)
-        if not rx:
-            continue
         token = "{nom}" if k == "n" else "{prenom}"
-        new = re.sub(rx, token, result, count=1)
-        if new != result:
-            result = new
-            placed[k] = True
+        for rx in _name_variants(ws):
+            new = re.sub(rx, token, result, count=1)
+            if new != result:
+                result = new
+                placed[k] = True
+                break
 
     # 2) Initiales : un segment d'UNE seule lettre égal à l'initiale (si le nom complet n'a pas été placé)
     def _repl_initial(s, letter, token):
@@ -130,7 +139,7 @@ def AddSoc(societe: Societe, db: Session):
 def AddAuto(db: Session, base: str):
     """
     Ajoute automatiquement les sociétés manquantes depuis une table de leads.
-    (ex: import_leads, silver_leads, etc.)
+    (ex: import_leads, leads, etc.)
     """
     try:
         # Un représentant par société (priorité aux lignes avec prénom ET nom non vides).

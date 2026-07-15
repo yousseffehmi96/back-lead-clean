@@ -5,6 +5,7 @@ from api.apiLeads import router as Leads_router
 from api.apiToken import Route as Token_router
 from model.staging_import_history import StagingImportHistory
 from model.steaging_applique import SteagingApplique
+from model.leads import Leads
 from fastapi.middleware.cors import CORSMiddleware
 from database.db import engine, Base
 from api.apiValidationRules import routes as validation_rules_router
@@ -92,6 +93,40 @@ with engine.begin() as conn:
         SET patterne = regexp_replace(patterne, '[._-]+@', '@', 'g')
         WHERE patterne ~ '[._-]+@'
     """))
+
+# Migration idempotente : fusion silver_leads + gold_leads -> leads
+# Le niveau de qualité devient un pourcentage (completion, 8 champs) ; Gold = 100%.
+# Les anciennes tables sont CONSERVÉES en *_backup (aucun DROP de données) le temps de valider.
+
+with engine.begin() as conn:
+    def _table_exists(name: str) -> bool:
+        return bool(conn.execute(
+            text("SELECT 1 FROM information_schema.tables WHERE table_name = :n"),
+            {"n": name},
+        ).scalar())
+
+    _cols = "email, nom, prenom, fonction, societe, telephone, linkedin, location, statu, created_at"
+    # Gold en premier : en cas de doublon d'email, la ligne la plus complète gagne.
+    for _src in ("gold_leads", "silver_leads"):
+        if not _table_exists(_src):
+            continue
+        _n = conn.execute(text(f"SELECT COUNT(*) FROM {_src}")).scalar() or 0
+        if _n:
+            conn.execute(text(f"""
+                INSERT INTO leads ({_cols})
+                SELECT {_cols} FROM {_src}
+                ON CONFLICT (email) DO NOTHING
+            """))
+        if _table_exists(f"{_src}_backup"):
+            # Fusion déjà faite : table recréée vide par create_all -> on la retire
+            if _n == 0:
+                conn.execute(text(f"DROP TABLE {_src}"))
+        else:
+            conn.execute(text(f"ALTER TABLE {_src} RENAME TO {_src}_backup"))
+
+    # La complétion n'est plus stockée : elle se calcule depuis les champs
+    # (front pour l'affichage, sql_completion_expr côté SQL).
+    conn.execute(text("ALTER TABLE leads DROP COLUMN IF EXISTS completion"))
 
 from util.auth import require_auth
 # Sécurité : toutes les routes exigent un token Clerk valide (si REQUIRE_AUTH=true)

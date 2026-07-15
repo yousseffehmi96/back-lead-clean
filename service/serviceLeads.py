@@ -1,8 +1,7 @@
 from sqlalchemy.orm import Session
 from model.societe_leads import societeleads
 from fastapi import HTTPException,Depends
-from model.silver_leads import Silver_leads
-from model.gold_leads import Gold_leads
+from model.leads import Leads
 from model.blacklistLeads import blacklistLeads
 from fastapi.responses import StreamingResponse
 from model.cleaning_leads import cleaningleads
@@ -10,7 +9,6 @@ from model.statistiqueLeads import StatisticLeads
 from model.staging_leads import StagingLeads
 from model.staging_import_history import StagingImportHistory
 from model.steaging_applique import SteagingApplique
-from model.gold_leads import Gold_leads
 from sqlalchemy import or_,and_
 from sqlalchemy import text
 from datetime import datetime
@@ -22,6 +20,7 @@ import os
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from email.utils import make_msgid
 import csv
 import io
 import zipfile
@@ -72,11 +71,11 @@ def _build_email(patterne: str, prenom: str, nom: str) -> str:
 
 def SteagingAppliqueToSilver(db: Session, ids: list[int], pattern: str | None = None):
     """
-    Déplace une sélection de staging_leads vers silver_leads.
+    Déplace une sélection de staging_leads vers leads.
     Conditions:
     - société existe dans societe_leads (match par nom "normalisé")
     - on génère l'email si manquant (pattern + domaine/ext de la société)
-    - on n'insère pas si email vide ou déjà existant (unique) dans silver_leads
+    - on n'insère pas si email vide ou déjà existant (unique) dans leads
     """
     if not ids:
         return {"moved_to_silver": 0, "skipped": 0, "details": []}
@@ -179,7 +178,7 @@ def SteagingAppliqueToSilver(db: Session, ids: list[int], pattern: str | None = 
                     continue
 
                 # unique constraint: skip si existe déjà
-                exists = db.query(Silver_leads.id).filter(Silver_leads.email == email).first()
+                exists = db.query(Leads.id).filter(Leads.email == email).first()
                 if exists:
                     # L'utilisateur veut que ce lead disparaisse de staging_leads
                     db.delete(l)
@@ -189,7 +188,7 @@ def SteagingAppliqueToSilver(db: Session, ids: list[int], pattern: str | None = 
                     details.append({"id": l.id, "reason": "deleted_already_in_silver"})
                     continue
 
-                obj = Silver_leads(
+                obj = Leads(
                     email=email,
                     nom=l.nom,
                     prenom=l.prenom,
@@ -225,10 +224,20 @@ def SteagingAppliqueToSilver(db: Session, ids: list[int], pattern: str | None = 
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Erreur inattendue : {str(e)}")
+def _filtre_completion(db: Session, operateur: str):
+    """Filtre les leads sur la complétion calculée à la volée (non stockée)."""
+    from service.service import sql_completion_expr
+    return db.query(Leads).filter(text(f"{sql_completion_expr()} {operateur}"))
+
+def GetAllLeads(db:Session):
+    """Table unifiée : tous les leads. La complétion est calculée côté front."""
+    return db.query(Leads).all()
 def GetAllSilver(db:Session):
-    return db.query(Silver_leads).all()
+    """Vue rétro-compatible : les leads incomplets (< 100%)."""
+    return _filtre_completion(db, "< 100").all()
 def GetAllGold(db:Session):
-    return db.query(Gold_leads).all()
+    """Vue rétro-compatible : les leads complets (Gold, 100%)."""
+    return _filtre_completion(db, "= 100").all()
 def GetAllBlack(db:Session):
     return db.query(blacklistLeads).all()
 def GetAllClean(db:Session):
@@ -276,8 +285,7 @@ def ExportDatabaseZip(db: Session, is_manager: bool):
         "import_leads",
         "staging_import_history",
         "cleaning_leads",
-        "silver_leads",
-        "gold_leads",
+        "leads",
         "blacklist_leads",
         "staging_leads",
         "statistic_leads",
@@ -394,7 +402,7 @@ def UpdateSilverEmail(db: Session, lead_id: int, email: str):
         if not cleaned:
             raise HTTPException(status_code=400, detail="Email invalide")
 
-        lead = db.query(Silver_leads).filter(Silver_leads.id == lead_id).first()
+        lead = db.query(Leads).filter(Leads.id == lead_id).first()
         if not lead:
             raise HTTPException(status_code=404, detail="Lead silver introuvable")
 
@@ -414,6 +422,54 @@ def UpdateSilverEmail(db: Session, lead_id: int, email: str):
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Erreur inattendue : {str(e)}")
+def UpdateLeadField(db: Session, lead_id: int, field: str, value):
+    """Met à jour un champ d'un lead depuis le tableau.
+    La complétion n'est pas stockée : le front la recalcule à partir des champs."""
+    from service.service import COMPLETION_FIELDS
+    try:
+        if field not in COMPLETION_FIELDS:
+            raise HTTPException(status_code=400, detail=f"Champ '{field}' non modifiable")
+
+        lead = db.query(Leads).filter(Leads.id == lead_id).first()
+        if not lead:
+            raise HTTPException(status_code=404, detail="Lead introuvable")
+
+        # Une chaîne vide (ou parasite) = champ vidé -> NULL, la complétion baisse
+        cleaned = str(value or "").strip()
+        if cleaned.lower() in ("", "nan", "none", "null"):
+            cleaned = None
+
+        if field == "email" and cleaned:
+            exists = (
+                db.query(Leads.id)
+                .filter(Leads.email == cleaned, Leads.id != lead_id)
+                .first()
+            )
+            if exists:
+                raise HTTPException(status_code=409, detail="Email déjà utilisé par un autre lead")
+
+        setattr(lead, field, cleaned)
+        db.commit()
+        db.refresh(lead)
+
+        return {
+            "id": lead.id,
+            "field": field,
+            "value": cleaned,
+        }
+    except HTTPException:
+        raise
+    except SQLAlchemyError as e:
+        db.rollback()
+        msg = str(e)
+        if "UniqueViolation" in msg or "duplicate key" in msg or "unique constraint" in msg:
+            raise HTTPException(status_code=409, detail="Email déjà utilisé")
+        raise HTTPException(status_code=500, detail=f"Erreur base de données : {msg}")
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Erreur inattendue : {str(e)}")
+
+
 def ClearBaseTable(db: Session, base: str):
     try:
         result = db.execute(text(f"DELETE FROM {base}"))
@@ -437,13 +493,17 @@ def GetAllStagingImportHistory(db: Session, userid: str | None = None):
     history_rows = history_query.order_by(StagingImportHistory.imported_at.desc()).all()
 
     # Sets de matching en mémoire (beaucoup plus rapide que CASE/EXISTS corrélé).
-    gold_emails = {norm(x[0]) for x in db.query(Gold_leads.email).all() if norm(x[0])}
-    silver_emails = {norm(x[0]) for x in db.query(Silver_leads.email).all() if norm(x[0])}
+    # Silver/Gold sont la même table `leads` : la destination se déduit de la
+    # complétion, calculée à la volée (elle n'est pas stockée).
+    _gold_q = _filtre_completion(db, "= 100")
+    _silver_q = _filtre_completion(db, "< 100")
+    gold_emails = {norm(l.email) for l in _gold_q.all() if norm(l.email)}
+    silver_emails = {norm(l.email) for l in _silver_q.all() if norm(l.email)}
     clean_emails = {norm(x[0]) for x in db.query(cleaningleads.email).all() if norm(x[0])}
     blacklist_emails = {norm(x[0]) for x in db.query(blacklistLeads.email).all() if norm(x[0])}
 
-    gold_keys = {(norm(r.nom), norm(r.prenom), norm(r.societe)) for r in db.query(Gold_leads.nom, Gold_leads.prenom, Gold_leads.societe).all()}
-    silver_keys = {(norm(r.nom), norm(r.prenom), norm(r.societe)) for r in db.query(Silver_leads.nom, Silver_leads.prenom, Silver_leads.societe).all()}
+    gold_keys = {(norm(l.nom), norm(l.prenom), norm(l.societe)) for l in _gold_q.all()}
+    silver_keys = {(norm(l.nom), norm(l.prenom), norm(l.societe)) for l in _silver_q.all()}
     clean_keys = {(norm(r.nom), norm(r.prenom), norm(r.societe)) for r in db.query(cleaningleads.nom, cleaningleads.prenom, cleaningleads.societe).all()}
 
     enriched = []
@@ -491,13 +551,18 @@ def GetAllStagingImportHistory(db: Session, userid: str | None = None):
         })
 
     return enriched
-def DownloadProdLeadCSV(types:str,db: Session):
+def DownloadProdLeadCSV(types:str,db: Session, ids: list[int] | None = None):
     try:
         # 1️⃣ Charger les données
-        if(types=="silver"):
-            leads = db.query(Silver_leads).all()
-        else:   
-            leads = db.query(Gold_leads).all()
+        if ids:
+            # Sélection explicite envoyée par le front (ex: les leads à 100%)
+            leads = db.query(Leads).filter(Leads.id.in_(ids)).all()
+        elif(types=="silver"):
+            leads = _filtre_completion(db, "< 100").all()
+        elif(types=="gold"):
+            leads = _filtre_completion(db, "= 100").all()
+        else:
+            leads = db.query(Leads).all()
 
         
         if not leads:
@@ -559,12 +624,17 @@ def DownloadProdLeadCSV(types:str,db: Session):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erreur lors de la génération du CSV : {str(e)}")
-def DownloadLeadXlsx(types:str,db: Session):
+def DownloadLeadXlsx(types:str,db: Session, ids: list[int] | None = None):
     try:
-        if(types=="silver"):
-            leads = db.query(Silver_leads).all()
-        else:   
-            leads = db.query(Gold_leads).all()
+        if ids:
+            # Sélection explicite envoyée par le front (ex: les leads à 100%)
+            leads = db.query(Leads).filter(Leads.id.in_(ids)).all()
+        elif(types=="silver"):
+            leads = _filtre_completion(db, "< 100").all()
+        elif(types=="gold"):
+            leads = _filtre_completion(db, "= 100").all()
+        else:
+            leads = db.query(Leads).all()
         
         if not leads:
             raise HTTPException(status_code=404, detail="Aucun lead à télécharger")
@@ -798,7 +868,7 @@ def DownloadLatestStagingImportXlsx(db: Session, userid: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erreur export dernier import XLSX : {str(e)}")
 def ToBlack(id:int,eliminer:str,db:Session):
-    result =db.query(Gold_leads).filter(Gold_leads.id==id).first()
+    result =db.query(Leads).filter(Leads.id==id).first()
     if (not result):
         raise HTTPException(
                status_code=404,
@@ -826,9 +896,9 @@ def ToBlack(id:int,eliminer:str,db:Session):
     
 def StagingToSilver(db: Session,base:str):
     try:
-        # 1️⃣ INSERT INTO silver_leads depuis staging (évite les doublons)
+        # 1️⃣ INSERT INTO leads depuis staging (évite les doublons)
         result = db.execute(text(f"""
-            INSERT INTO silver_leads (nom, prenom, email, fonction, societe, telephone, linkedin, location)
+            INSERT INTO leads (nom, prenom, email, fonction, societe, telephone, linkedin, location)
             SELECT DISTINCT ON (email) 
                 nom, prenom, email, fonction, societe, telephone, linkedin, location
             FROM {base}
@@ -850,7 +920,7 @@ def StagingToSilver(db: Session,base:str):
                   OR linkedin IS NULL OR linkedin = '' OR linkedin = 'nan'
               )
               AND NOT EXISTS (
-                  SELECT 1 FROM silver_leads s WHERE s.email = {base}.email
+                  SELECT 1 FROM leads s WHERE s.email = {base}.email
               )
             ORDER BY email, id
         """))
@@ -1013,9 +1083,9 @@ def StagingToSteagingApplique(db: Session, base: str):
 def StagingToGold(db: Session,base:str):
     try:
         
-        #  INSERT INTO gold_leads depuis staging (évite les doublons)
+        #  INSERT INTO leads depuis staging (évite les doublons)
         result = db.execute(text(f"""
-            INSERT INTO gold_leads (nom, prenom, email, fonction, societe, telephone, linkedin, location)
+            INSERT INTO leads (nom, prenom, email, fonction, societe, telephone, linkedin, location)
             SELECT DISTINCT ON (email) 
                 nom, prenom, email, fonction, societe, telephone, linkedin, location
             FROM {base}
@@ -1044,7 +1114,7 @@ def StagingToGold(db: Session,base:str):
               AND location != ''
               AND location != 'nan'
               AND NOT EXISTS (
-                  SELECT 1 FROM gold_leads g WHERE g.email = {base}.email
+                  SELECT 1 FROM leads g WHERE g.email = {base}.email
               )
             ORDER BY email, id
         """))
@@ -1192,64 +1262,32 @@ def CompleteNomPrenomFromEmail(db: Session,base:str):
 
 
 def SilverToGold(db:Session,id:int):
+    """Fusion Silver+Gold : il n'y a plus de déplacement entre tables.
+    La complétion est calculée à la volée ; le lead est Gold si elle vaut 100%."""
+    from service.service import sql_completion_expr
     try:
-            print("id")
-            silver=db.query(Silver_leads).filter(
-                Silver_leads.nom != '',
-                Silver_leads.nom != 'nan',
-                Silver_leads.nom.isnot(None),
-                Silver_leads.prenom != '',
-                Silver_leads.prenom != 'nan',
-                Silver_leads.prenom.isnot(None),
-                Silver_leads.email != '',
-                Silver_leads.email != 'nan',
-                Silver_leads.email.isnot(None),
-                Silver_leads.societe != '',
-                Silver_leads.societe != 'nan',
-                Silver_leads.societe.isnot(None),
-                Silver_leads.id==id,
-                Silver_leads.fonction != '' ,
-                Silver_leads.fonction!= 'nan',
-               Silver_leads.fonction.isnot(None),
-               Silver_leads.linkedin != '' ,
-                Silver_leads.linkedin!= 'nan',
-               Silver_leads.linkedin.isnot(None),
-               Silver_leads.telephone != '' ,
-                Silver_leads.telephone!= 'nan',
-               Silver_leads.telephone.isnot(None),
-               Silver_leads.location != '',
-               Silver_leads.location != 'nan',
-               Silver_leads.location.isnot(None)
-            ).first()
-            if silver is None:
-                    raise HTTPException(
-                        status_code=400,
-                        detail="Lead incomplet → impossible de passer en GOLD"
-                    )
+            lead = db.query(Leads).filter(Leads.id == id).first()
+            if lead is None:
+                raise HTTPException(status_code=404, detail="Lead introuvable")
 
-            print(silver)
+            completion = int(db.execute(
+                text(f"SELECT {sql_completion_expr()} FROM leads WHERE id = :id"),
+                {"id": id},
+            ).scalar() or 0)
 
-            gold = Gold_leads(
-                    email=silver.email,
-                    nom=silver.nom,
-                    prenom=silver.prenom,
-                    fonction=silver.fonction,
-                    societe=silver.societe,
-                    telephone=silver.telephone,
-                    linkedin=silver.linkedin,
-                    location=silver.location
+            if completion < 100:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Lead incomplet ({completion}%) → impossible de passer en GOLD",
                 )
-
-
-
-            db.add(gold)
-            db.delete(silver)
-            db.commit()
             return {
-                    "message": "Lead ajouté avec succès dans GOLD"
-}
+                "message": "Lead Gold (100% complété)",
+                "completion": completion,
+                "gold": True,
+            }
 
-    
+    except HTTPException:
+        raise
     except SQLAlchemyError as e:
         db.rollback()
         print(str(e))
@@ -1661,16 +1699,16 @@ def _find_region_ville(location: str) -> tuple[str, str]:
     return "", ""
 
 
-def Rephrase(db: Session, base: str = "silver_leads"):
+def Rephrase(db: Session, base: str = "leads"):
     """
     Reformule le champ location avec le format: City, Region, Country
     Exemple: "Paris, Ile-de-France, France"
     """
     try:
         if "silver" in base.lower():
-            leads = db.query(Silver_leads).all()
+            leads = db.query(Leads).all()
         else:
-            leads = db.query(Gold_leads).all()
+            leads = db.query(Leads).all()
         
         updated_count = 0
         
@@ -1801,9 +1839,9 @@ def smtp_probe(email_addr: str, timeout: int = 8) -> dict:
 
 def _apply_statu(db: Session, to_email: str, statu: str):
     """Met à jour le statut sur silver/gold (par email) + tous les leads applique correspondants."""
-    lead = db.query(Silver_leads).filter(Silver_leads.email == to_email).first()
+    lead = db.query(Leads).filter(Leads.email == to_email).first()
     if not lead:
-        lead = db.query(Gold_leads).filter(Gold_leads.email == to_email).first()
+        lead = db.query(Leads).filter(Leads.email == to_email).first()
     if lead:
         lead.statu = statu
     db.query(SteagingApplique).filter(SteagingApplique.email == to_email).update(
@@ -1812,23 +1850,46 @@ def _apply_statu(db: Session, to_email: str, statu: str):
     db.commit()
 
 
+EMAIL_OBJET = "Proposition Bureau #05202404-10432345"
+
+EMAIL_CORPS = """Bonjour,
+
+Représentant de LYNK FREETEK, nous disposons d'une équipe compétente pour vous accompagner sur les recherches bureaux commerciales sur toute la France
+
+J'aimerais discuter des possibilités de partenariats lors d'une visioconférence ou d'un appel.
+
+Merci de me faire part de vos disponibilités.
+
+
+Restant à votre disposition pour plus d'informations.
+
+
+Service commercial
+"""
+
+
 def send_email(to_email: str, message_id: str) -> bool:
     """
-    Envoie un vrai email à l'adresse donnée.
-    Retourne le résultat : succès, erreur 501, adresse inconnue, etc.
+    Envoie l'email à l'adresse donnée.
+    Lève une exception smtplib si le relais refuse le destinataire.
     """
 
     SMTP_USER= os.getenv("SMTP_USER")
     SMTP_HOST=os.getenv("SMTP_HOST")
-    SMTP_PORT=os.getenv("SMTP_PORT")
+    SMTP_PORT=int(os.getenv("SMTP_PORT") or 587)
     SMTP_PASSWORD=os.getenv("SMTP_PASSWORD")
-    
+
     msg = MIMEMultipart()
     msg["From"]    = SMTP_USER
     msg["To"]      = to_email
-    msg["Subject"] = "Test de vérification"
-    msg.attach(MIMEText("Ceci est un email de test.", "plain"))
- 
+    msg["Subject"] = EMAIL_OBJET
+    # Indispensable : check_bounce recherche ce Message-ID dans les retours
+    # mailer-daemon. Sans lui, on ne peut pas relier un bounce à son envoi.
+    msg["Message-ID"] = message_id
+    # charset utf-8 obligatoire : le corps contient des accents (« Représentant »,
+    # « disponibilités »). Sans ça, MIMEText part en us-ascii et les casse.
+    msg.attach(MIMEText(EMAIL_CORPS, "plain", "utf-8"))
+
     with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10) as smtp:
         smtp.ehlo()
         smtp.starttls()
@@ -1837,7 +1898,13 @@ def send_email(to_email: str, message_id: str) -> bool:
     return True
 
 
-def check_bounce(message_id: str, to_email: str) -> dict | None:
+def check_bounce(message_id: str, to_email: str, limite: int = 10) -> dict | None:
+    """Cherche un retour mailer-daemon correspondant à cet envoi.
+
+    `limite` = nombre de derniers bounces inspectés. Pour un lot d'envois, il
+    faut l'élargir : sinon les bounces au-delà des N derniers sont manqués et
+    l'adresse serait déclarée valide à tort.
+    """
     IMAP_HOST     = os.getenv("IMAP_HOST")
     SMTP_USER     = os.getenv("SMTP_USER")
     SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
@@ -1849,7 +1916,7 @@ def check_bounce(message_id: str, to_email: str) -> dict | None:
         _, data = imap.search(None, 'OR FROM "mailer-daemon" FROM "postmaster"')
         ids = data[0].split()
 
-        for mail_id in reversed(ids[-10:]):
+        for mail_id in reversed(ids[-limite:]):
             _, msg_data = imap.fetch(mail_id, "(RFC822)")
             raw = msg_data[0][1]
             msg = email.message_from_bytes(raw)
@@ -1873,22 +1940,114 @@ def check_bounce(message_id: str, to_email: str) -> dict | None:
     return None
  
  
-def send_and_check(to_email: str, db: Session = None) -> dict:
+def send_and_check(to_email: str, db: Session = None, attente: int = 20) -> dict:
     """
-    Vérifie une adresse via sonde SMTP RCPT (aucun email envoyé, aucune attente).
-    Met à jour le statut (silver/gold/applique) : 250 -> disponible, sinon -> non disponible.
+    Envoie un vrai email de test à l'adresse, puis attend un éventuel retour
+    mailer-daemon (bounce) pendant `attente` secondes pour conclure.
+
+    250 -> aucun bounce reçu (adresse considérée valide)
+    550 -> destinataire refusé à l'envoi, ou bounce reçu
+    450 -> indéterminé (erreur SMTP/IMAP)
+
+    ⚠️ L'absence de bounce dans la fenêtre d'attente NE PROUVE PAS que la boîte
+    existe : un rejet peut arriver plusieurs heures après. Le verdict 250 est
+    donc optimiste. La sonde smtp_probe() reste disponible pour un test
+    immédiat et sans envoi.
     """
-    res = smtp_probe(to_email)
+    addr = str(to_email or "").strip().lower()
+    if "@" not in addr:
+        return {"email": addr, "status": "❌ format invalide", "code": 550, "raison": "❌ format invalide"}
+
+    message_id = make_msgid()
+
+    # 1) Envoi. Un refus immédiat du destinataire tranche déjà la question.
+    try:
+        send_email(addr, message_id)
+    except smtplib.SMTPRecipientsRefused:
+        res = {"email": addr, "code": 550, "status": "❌ destinataire refusé à l'envoi"}
+    except Exception as e:
+        res = {"email": addr, "code": 450, "status": f"⚠️ envoi impossible ({e})"}
+    else:
+        # 2) Attente d'un bounce : on interroge la boîte toutes les 5 s.
+        bounce = None
+        fin = time.time() + max(0, attente)
+        while time.time() < fin:
+            time.sleep(5)
+            try:
+                bounce = check_bounce(message_id, addr)
+            except Exception as e:
+                print(f"⚠️ Lecture IMAP impossible pour {addr} : {e}")
+                break
+            if bounce:
+                break
+        if bounce:
+            res = {"email": addr, "code": 550, "status": f"❌ rejeté : {bounce.get('subject') or 'bounce reçu'}"}
+        else:
+            res = {"email": addr, "code": 250, "status": f"✅ aucun rejet en {attente}s"}
+
     is_valid = int(res.get("code", 0) or 0) == 250
     statu = "disponible" if is_valid else "non disponible"
     if db:
-        _apply_statu(db, to_email, statu)
+        _apply_statu(db, addr, statu)
     return {
-        "email":  to_email,
+        "email":  addr,
         "status": res.get("status", ""),
         "code":   res.get("code", 0),
         "raison": res.get("status", ""),
     }
+
+
+def send_and_check_bulk(emails: list, db: Session = None, attente: int = 20) -> list:
+    """
+    Envoie un email de test à chaque adresse, puis attend UNE SEULE fois avant
+    de relever les bounces.
+
+    Appeler send_and_check() en boucle multiplierait l'attente par le nombre
+    d'adresses (20s x N) et ferait expirer la requête.
+    """
+    envois = []
+    for brut in emails or []:
+        addr = str(brut or "").strip().lower()
+        if "@" not in addr:
+            envois.append((addr, None, {"code": 550, "status": "❌ format invalide"}))
+            continue
+        message_id = make_msgid()
+        try:
+            send_email(addr, message_id)
+            envois.append((addr, message_id, None))
+        except smtplib.SMTPRecipientsRefused:
+            envois.append((addr, None, {"code": 550, "status": "❌ destinataire refusé à l'envoi"}))
+        except Exception as e:
+            envois.append((addr, None, {"code": 450, "status": f"⚠️ envoi impossible ({e})"}))
+
+    # Une seule fenêtre d'attente, commune à tout le lot
+    if any(mid for _, mid, _ in envois):
+        time.sleep(max(0, attente))
+
+    resultats = []
+    for addr, message_id, verdict in envois:
+        if verdict is None:
+            try:
+                # Fenêtre de lecture élargie : un lot génère plusieurs bounces
+                bounce = check_bounce(message_id, addr, limite=max(10, 4 * len(envois)))
+            except Exception as e:
+                print(f"⚠️ Lecture IMAP impossible pour {addr} : {e}")
+                bounce = None
+            verdict = (
+                {"code": 550, "status": f"❌ rejeté : {bounce.get('subject') or 'bounce reçu'}"}
+                if bounce
+                else {"code": 250, "status": f"✅ aucun rejet en {attente}s"}
+            )
+        statu = "disponible" if int(verdict.get("code", 0) or 0) == 250 else "non disponible"
+        if db:
+            _apply_statu(db, addr, statu)
+        resultats.append({
+            "email":  addr,
+            "status": verdict.get("status", ""),
+            "code":   verdict.get("code", 0),
+            "raison": verdict.get("status", ""),
+        })
+    return resultats
 
 
 # ---------------------------------------------------------------------------
@@ -2037,65 +2196,89 @@ def _autoadd_societe_from_email(db: Session, nom_soc: str, email: str, prenom, n
         return None
 
 
-def _verify_one_applique(db: Session, lead, company_map: dict) -> dict:
+def _verify_one_applique(db: Session, lead, company_map: dict, envoyer_test: bool = False) -> dict:
     """
     Flux de vérification :
-    1) Société AVEC patterne -> on génère l'email depuis le patterne et on marque DISPONIBLE
-       DIRECTEMENT, SANS test SMTP (on fait confiance au patterne).
-    2) Sinon (pas de patterne / génération impossible) -> on TESTE l'email actuel via la sonde SMTP.
-       - livré (250) -> disponible + on APPREND la société (patterne + regex dérivés de cet email).
-       - sinon -> non disponible.
+    1) On confronte l'email du lead au patterne de sa société (via la regex stockée) :
+       - conforme     -> on garde l'email du lead tel quel
+       - non conforme -> on le régénère depuis le patterne
+    2) On teste l'adresse retenue :
+       - envoyer_test=True  -> envoi d'un VRAI email de test + attente d'un bounce
+                               (250 = aucun rejet -> disponible)
+       - envoyer_test=False -> sonde SMTP RCPT, aucun envoi (utilisé par la
+                               vérification de masse : 100 envois simultanés
+                               feraient suspendre le compte SMTP).
     """
     email = (lead.email or "").strip().lower()
     nom_soc = (lead.societe or "").strip()
     key = _norm_company_key(nom_soc)
-    _regex, patterne_raw = company_map.get(key, ("", ""))
+    regex_raw, patterne_raw = company_map.get(key, ("", ""))
     patternes = _split_lines(patterne_raw)
+    regexes = _split_lines(regex_raw)
 
-    # 1) Patterne trouvé -> disponible sans vérifier le serveur
-    if patternes:
+    # 1) L'email du lead correspond-il au patterne de sa société ?
+    conforme = False
+    for rgx in regexes:
+        try:
+            if email and re.match(rgx, email, re.IGNORECASE):
+                conforme = True
+                break
+        except re.error:
+            continue
+
+    cible = email
+    regenere = False
+    if not conforme and patternes:
         p = _norm_name_part(lead.prenom)
         n = _norm_name_part(lead.nom)
         for patt in patternes:
             gen = _build_email(patt, p, n)
             gen = (NettoyerUnEmail(gen) or gen or "").strip().lower()
-            if not gen or "@" not in gen or "{" in gen:
-                continue
-            lead.email = gen
-            lead.statu = "disponible"
-            db.commit()
-            return {"id": lead.id, "email": gen, "statu": "disponible",
-                    "regenerated": True, "patterne": patt, "trusted": True}
+            if gen and "@" in gen and "{" not in gen:
+                cible = gen
+                regenere = True
+                break
 
-    # 2) Pas de patterne exploitable -> tester l'email actuel via SMTP.
-    #    On fait CONFIANCE : disponible sauf REJET explicite (550) du serveur.
-    #    250 = accepté, 450 = catch-all/greylist (non concluant) -> disponible ;
-    #    550 = mailbox inexistante, 0 = injoignable -> non disponible.
-    if email and "@" in email:
-        code = int(smtp_probe(email).get("code", 0) or 0)
-        if code in (250, 450):
-            lead.statu = "disponible"
-            db.commit()
-            # Email accepté/non concluant -> on apprend la société (patterne + regex dérivés)
-            added = _autoadd_societe_from_email(db, nom_soc, email, lead.prenom, lead.nom)
-            if added and key:
-                company_map[key] = added
-            return {"id": lead.id, "email": email, "statu": "disponible",
-                    "regenerated": False, "code": code, "societe_added": bool(added),
-                    "trusted": code != 250}
+    if not cible or "@" not in cible:
+        lead.statu = "non disponible"
+        db.commit()
+        return {"id": lead.id, "email": cible, "statu": "non disponible",
+                "regenerated": False, "conforme": conforme, "trusted": False}
 
-    # 3) Rejet explicite (550) ou serveur injoignable -> non disponible
-    lead.statu = "non disponible"
+    lead.email = cible
     db.commit()
-    return {"id": lead.id, "email": email, "statu": "non disponible", "regenerated": False, "trusted": False}
+
+    # 2) Test de l'adresse retenue
+    if envoyer_test:
+        res = send_and_check(cible, db)   # envoi réel + bounce ; met aussi statu à jour
+        code = int(res.get("code", 0) or 0)
+        statu = "disponible" if code == 250 else "non disponible"
+    else:
+        code = int(smtp_probe(cible).get("code", 0) or 0)
+        # 450 = catch-all / greylist : non concluant, on ne condamne pas l'adresse
+        statu = "disponible" if code in (250, 450) else "non disponible"
+        lead.statu = statu
+        db.commit()
+
+    # L'email d'origine était conforme et accepté -> on apprend la société
+    if statu == "disponible" and not regenere:
+        added = _autoadd_societe_from_email(db, nom_soc, cible, lead.prenom, lead.nom)
+        if added and key:
+            company_map[key] = added
+
+    return {"id": lead.id, "email": cible, "statu": statu,
+            "regenerated": regenere, "conforme": conforme, "code": code,
+            "trusted": False}
 
 
 def VerifyAppliqueLead(db: Session, lead_id: int) -> dict:
+    """Vérification à l'unité (bouton « Vérifier email ») : envoi d'un vrai
+    email de test sur l'adresse retenue."""
     lead = db.query(SteagingApplique).filter(SteagingApplique.id == lead_id).first()
     if not lead:
         raise HTTPException(status_code=404, detail="Lead introuvable")
     cm = _company_map_regex_patterne(db)
-    return _verify_one_applique(db, lead, cm)
+    return _verify_one_applique(db, lead, cm, envoyer_test=True)
 
 
 def VerifyAppliqueBulk(db: Session, ids: list) -> dict:

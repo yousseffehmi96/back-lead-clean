@@ -10,7 +10,7 @@ from model.staging_leads import StagingLeads
 from model.blacklistLeads import blacklistLeads
 from model.cleaning_leads import cleaningleads
 from model.societe_leads import societeleads
-from model.silver_leads import Silver_leads
+from model.leads import Leads
 from util.util import NetoyerUneChaine, NetoyerUnNumero, NettoyerUnEmail
 from model.statistiqueLeads import StatisticLeads
 from schema.schemaStatic import Static 
@@ -235,6 +235,64 @@ def LoadFileToBd(file: UploadFile, db: Session, userid: Optional[str] = None, us
         raise HTTPException(status_code=500, detail=f"Erreur : {str(e)}")
 
 
+# --- Complétion des leads (fusion Silver + Gold) ---------------------------
+# Les 8 champs qui comptent dans le pourcentage (12,5% chacun).
+COMPLETION_FIELDS = [
+    "nom", "prenom", "email", "societe",
+    "fonction", "telephone", "linkedin", "location",
+]
+
+
+def _sql_champ_rempli(col: str) -> str:
+    """Expression SQL : 1 si la colonne est réellement renseignée, sinon 0.
+    Les valeurs parasites ('', 'nan', 'none', 'null') comptent comme vides."""
+    return (
+        f"(CASE WHEN {col} IS NOT NULL "
+        f"AND LOWER(TRIM({col})) NOT IN ('', 'nan', 'none', 'null') "
+        f"THEN 1 ELSE 0 END)"
+    )
+
+
+def sql_completion_expr(prefix: str = "") -> str:
+    """Expression SQL renvoyant la complétion (0-100) sur les 8 champs."""
+    total = " + ".join(_sql_champ_rempli(f"{prefix}{c}") for c in COMPLETION_FIELDS)
+    return f"ROUND((({total}) * 100.0) / {len(COMPLETION_FIELDS)})"
+
+
+# Correspondance champ (front) -> colonne (import_leads).
+# Le front utilise "localisation", la base "location" ; le reste est identique.
+FIELD_TO_COLUMN = {
+    "prenom": "prenom",
+    "nom": "nom",
+    "email": "email",
+    "societe": "societe",
+    "fonction": "fonction",
+    "telephone": "telephone",
+    "localisation": "location",
+    "linkedin": "linkedin",
+}
+
+
+def ApplyFieldMapping(rows, mapping):
+    """Transforme des lignes brutes (clés = entêtes du fichier) en lignes
+    canoniques (clés = colonnes de import_leads), à partir d'un mapping
+    {champ_front: entête_source} choisi par l'utilisateur côté front.
+
+    Le nettoyage/déduplication reste géré ensuite par LoadRowsToBd."""
+    if not mapping:
+        return rows
+    mapped = []
+    for row in rows or []:
+        new_row = {}
+        for field, source_header in mapping.items():
+            column = FIELD_TO_COLUMN.get(field)
+            if not column or not source_header:
+                continue
+            new_row[column] = row.get(source_header)
+        mapped.append(new_row)
+    return mapped
+
+
 def LoadRowsToBd(rows, db: Session, userid: Optional[str] = None, username: Optional[str] = None, filename: Optional[str] = None):
     """Insère des lignes déjà mappées (liste de dicts) dans import_leads + historique.
 
@@ -327,7 +385,7 @@ def LoadRowsToBd(rows, db: Session, userid: Optional[str] = None, username: Opti
 
 def SupprimerDoublonsMemetABLE(db: Session, table: str):
     try:
-        allowed_tables = {"import_leads", "cleaning_leads", "silver_leads"}
+        allowed_tables = {"import_leads", "cleaning_leads", "leads"}
         if table not in allowed_tables:
             raise HTTPException(status_code=400, detail=f"Table '{table}' non autorisée.")
 
@@ -361,41 +419,33 @@ def SupprimerDoublons(db: Session):
         results = {}
         total_deleted = 0
 
-        query_staging_silver = text("""
-            DELETE FROM import_leads
-            WHERE id IN (
-                SELECT s.id
-                FROM import_leads s
-                INNER JOIN silver_leads sl ON 
-                    COALESCE(s.email, '') = COALESCE(sl.email, '') AND
-                    COALESCE(s.nom, '') = COALESCE(sl.nom, '') AND
-                    COALESCE(s.prenom, '') = COALESCE(sl.prenom, '')
-                WHERE s.email IS NOT NULL AND s.email != ''
-            )
-        """)
-        res1 = db.execute(query_staging_silver)
-        staging_vs_silver = res1.rowcount if hasattr(res1, "rowcount") else 0
-        results["staging_vs_silver"] = staging_vs_silver
-        total_deleted += staging_vs_silver
-        print(f"✅ STAGING vs SILVER: {staging_vs_silver} doublons supprimés")
+        # Silver et Gold sont désormais la même table `leads` : on distingue les deux
+        # par la complétion (Gold = 100%) pour conserver le détail des statistiques.
+        def _dedup_vs_leads(condition_completion: str) -> int:
+            res = db.execute(text(f"""
+                DELETE FROM import_leads
+                WHERE id IN (
+                    SELECT s.id
+                    FROM import_leads s
+                    INNER JOIN leads l ON
+                        COALESCE(s.email, '') = COALESCE(l.email, '') AND
+                        COALESCE(s.nom, '') = COALESCE(l.nom, '') AND
+                        COALESCE(s.prenom, '') = COALESCE(l.prenom, '')
+                    WHERE s.email IS NOT NULL AND s.email != ''
+                      AND {condition_completion}
+                )
+            """))
+            return res.rowcount if hasattr(res, "rowcount") else 0
 
-        query_staging_gold = text("""
-            DELETE FROM import_leads
-            WHERE id IN (
-                SELECT s.id
-                FROM import_leads s
-                INNER JOIN gold_leads g ON 
-                    COALESCE(s.email, '') = COALESCE(g.email, '') AND
-                    COALESCE(s.nom, '') = COALESCE(g.nom, '') AND
-                    COALESCE(s.prenom, '') = COALESCE(g.prenom, '')
-                WHERE s.email IS NOT NULL AND s.email != ''
-            )
-        """)
-        res2 = db.execute(query_staging_gold)
-        staging_vs_gold = res2.rowcount if hasattr(res2, "rowcount") else 0
+        staging_vs_gold = _dedup_vs_leads(f"{sql_completion_expr('l.')} = 100")
         results["staging_vs_gold"] = staging_vs_gold
         total_deleted += staging_vs_gold
-        print(f"✅ STAGING vs GOLD: {staging_vs_gold} doublons supprimés")
+        print(f"✅ STAGING vs GOLD (leads 100%): {staging_vs_gold} doublons supprimés")
+
+        staging_vs_silver = _dedup_vs_leads(f"{sql_completion_expr('l.')} < 100")
+        results["staging_vs_silver"] = staging_vs_silver
+        total_deleted += staging_vs_silver
+        print(f"✅ STAGING vs SILVER (leads < 100%): {staging_vs_silver} doublons supprimés")
 
         query_staging_applique = text("""
             DELETE FROM import_leads
@@ -910,7 +960,7 @@ def StagingToProd(db: Session):
             raise HTTPException(status_code=404, detail="Aucun lead en staging à traiter.")
 
         existing_emails = {
-            r.email for r in db.query(Silver_leads.email).all()
+            r.email for r in db.query(Leads.email).all()
         }
 
         prod_rows = []
@@ -934,7 +984,7 @@ def StagingToProd(db: Session):
             else:
                 #  CAS 2 : email unique → prod
                 if row.email not in existing_emails:
-                    prod_rows.append(Silver_leads(
+                    prod_rows.append(Leads(
                         nom=row.nom,
                         prenom=row.prenom,
                         email=row.email,

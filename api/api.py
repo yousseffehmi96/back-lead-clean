@@ -45,9 +45,16 @@ async def Upload(userid: str = Form(...), username: str | None = Form(None), fil
 
 @Router.post("/upload-mapped")
 async def UploadMapped(payload=Body(...), db: Session = Depends(get_db)):
-    """Insère des lignes déjà mappées côté front (mapping manuel des colonnes)
-    dans import_leads, exactement comme /upload le fait pour un fichier."""
+    """Insère des lignes mappées (mapping manuel des colonnes) dans import_leads,
+    exactement comme /upload le fait pour un fichier.
+
+    - Si `mapping` est fourni, les `rows` sont des lignes brutes (entêtes du fichier)
+      et le mapping {champ: entête} est appliqué ici, côté serveur.
+    - Sinon, les `rows` sont supposées déjà mappées (clés canoniques)."""
     rows = payload.get("rows") or []
+    mapping = payload.get("mapping") or {}
+    if mapping:
+        rows = ApplyFieldMapping(rows, mapping)
     userid = str(payload.get("userid") or "")
     username = payload.get("username")
     filename = payload.get("filename") or "import-mappe"
