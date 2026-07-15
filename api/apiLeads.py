@@ -151,6 +151,13 @@ async def StagingDispatch(base:str,payload = Body(...), db: Session = Depends(ge
             # Le reste -> Staging (ex-applique)
             r9 = SP.StagingToSteagingApplique(db, base)
             result.update(r9)
+
+            # Des leads viennent d'arriver en staging : on déclenche en arrière-plan
+            # la vérification de tous les emails sans statut, puis on déplace
+            # automatiquement vers `leads` ceux qui ressortent "disponible".
+            verify_job = SP.trigger_auto_verify_unverified_staging(db)
+            result["auto_verify_job_id"] = verify_job.get("job_id")
+            result["auto_verify_total"] = verify_job.get("total")
         # --- Tri par tables finales (à réactiver plus tard) ---
         # r6 = SP.StagingToGold(db, base);  result.update(r6)
         # r7 = SP.StagingToSilver(db, base); result.update(r7)

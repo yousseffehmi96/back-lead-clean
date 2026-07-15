@@ -2059,23 +2059,23 @@ _JOBS_LOCK = threading.Lock()
 _VERIFY_WORKERS = 100
 
 
-def _verify_lead_task(lead_id: int, company_map: dict) -> str:
-    """Vérifie un lead applique dans sa propre session ; renvoie le statut final."""
+def _verify_lead_task(lead_id: int, company_map: dict) -> tuple:
+    """Vérifie un lead applique dans sa propre session ; renvoie (id, statut final)."""
     db = SessionLocal()
     try:
         lead = db.query(SteagingApplique).filter(SteagingApplique.id == lead_id).first()
         if not lead:
-            return "introuvable"
+            return (lead_id, "introuvable")
         res = _verify_one_applique(db, lead, dict(company_map))
-        return res.get("statu", "non disponible")
+        return (lead_id, res.get("statu", "non disponible"))
     except Exception:
         db.rollback()
-        return "erreur"
+        return (lead_id, "erreur")
     finally:
         db.close()
 
 
-def _run_verify_job(job_id: str, ids: list):
+def _run_verify_job(job_id: str, ids: list, auto_promote: bool = False):
     # snapshot du map société (lecture unique)
     db0 = SessionLocal()
     try:
@@ -2083,11 +2083,12 @@ def _run_verify_job(job_id: str, ids: list):
     finally:
         db0.close()
 
+    disponible_ids: list = []
     try:
         with ThreadPoolExecutor(max_workers=_VERIFY_WORKERS) as pool:
             futures = {pool.submit(_verify_lead_task, i, company_map): i for i in ids}
             for fut in as_completed(futures):
-                statu = fut.result()
+                lead_id, statu = fut.result()
                 with _JOBS_LOCK:
                     job = VERIFY_JOBS.get(job_id)
                     if not job:
@@ -2095,30 +2096,56 @@ def _run_verify_job(job_id: str, ids: list):
                     job["done"] += 1
                     if statu == "disponible":
                         job["disponible"] += 1
+                        disponible_ids.append(lead_id)
                     elif statu == "non disponible":
                         job["non_disponible"] += 1
                     else:
                         job["erreurs"] += 1
     finally:
+        promoted = {}
+        if auto_promote and disponible_ids:
+            db1 = SessionLocal()
+            try:
+                promoted = SteagingAppliqueToSilver(db1, ids=disponible_ids)
+                if int(promoted.get("moved_to_silver", 0) or 0) > 0:
+                    Rephrase(db1, "leads")
+            except Exception:
+                promoted = {}
+            finally:
+                db1.close()
         with _JOBS_LOCK:
             if job_id in VERIFY_JOBS:
                 VERIFY_JOBS[job_id]["status"] = "done"
+                VERIFY_JOBS[job_id]["moved_to_leads"] = int(promoted.get("moved_to_silver", 0) or 0)
 
 
-def start_verify_job(ids: list) -> dict:
+def start_verify_job(ids: list, auto_promote: bool = False) -> dict:
     ids = [int(i) for i in (ids or []) if str(i).strip() != ""]
     job_id = uuid.uuid4().hex
     with _JOBS_LOCK:
         VERIFY_JOBS[job_id] = {
             "status": "running", "total": len(ids), "done": 0,
             "disponible": 0, "non_disponible": 0, "erreurs": 0,
+            "moved_to_leads": 0,
         }
     if ids:
-        threading.Thread(target=_run_verify_job, args=(job_id, ids), daemon=True).start()
+        threading.Thread(target=_run_verify_job, args=(job_id, ids, auto_promote), daemon=True).start()
     else:
         with _JOBS_LOCK:
             VERIFY_JOBS[job_id]["status"] = "done"
     return {"job_id": job_id, "total": len(ids)}
+
+
+def trigger_auto_verify_unverified_staging(db: Session) -> dict:
+    """
+    Déclenché quand des leads viennent d'être déposés dans staging_leads
+    (ex: fin d'un import) : vérifie en arrière-plan tous les emails de
+    staging_leads sans statut (statu IS NULL), puis déplace automatiquement
+    vers `leads` ceux qui ressortent "disponible".
+    """
+    rows = db.execute(text("SELECT id FROM staging_leads WHERE statu IS NULL")).fetchall()
+    ids = [int(r[0]) for r in rows]
+    return start_verify_job(ids, auto_promote=True)
 
 
 def get_verify_job(job_id: str) -> dict:
