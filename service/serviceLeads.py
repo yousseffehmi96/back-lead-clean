@@ -964,6 +964,7 @@ def MoveIncompleteToClean(db: Session, base: str = "import_leads"):
     """
     Déplace vers cleaning_leads (À corriger) les contacts trop incomplets :
       - email vide ET société vide (impossible de générer/vérifier un email), OU
+      - nom vide ET prénom vide (impossible d'identifier le contact), OU
       - au moins 3 champs vides parmi {nom, prénom, email, société}.
     Les retire de {base}.
     """
@@ -975,7 +976,7 @@ def MoveIncompleteToClean(db: Session, base: str = "import_leads"):
         n, p = _empty(pfx + "nom"), _empty(pfx + "prenom")
         cnt = (f"((CASE WHEN {n} THEN 1 ELSE 0 END) + (CASE WHEN {p} THEN 1 ELSE 0 END)"
                f" + (CASE WHEN {e} THEN 1 ELSE 0 END) + (CASE WHEN {s} THEN 1 ELSE 0 END))")
-        return f"(({e} AND {s}) OR {cnt} >= 3)"
+        return f"(({e} AND {s}) OR ({n} AND {p}) OR {cnt} >= 3)"
 
     try:
         result = db.execute(text(f"""
