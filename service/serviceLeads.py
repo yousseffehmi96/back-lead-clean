@@ -69,16 +69,16 @@ def _build_email(patterne: str, prenom: str, nom: str) -> str:
          .replace("{n}", (nom or "")[:1])
     )
 
-def SteagingAppliqueToSilver(db: Session, ids: list[int], pattern: str | None = None):
+def SteagingAppliqueToOptimized(db: Session, ids: list[int], pattern: str | None = None):
     """
-    Déplace une sélection de staging_leads vers leads.
+    Déplace une sélection de staging_leads vers optimized.
     Conditions:
     - société existe dans societe_leads (match par nom "normalisé")
     - on génère l'email si manquant (pattern + domaine/ext de la société)
-    - on n'insère pas si email vide ou déjà existant (unique) dans leads
+    - on n'insère pas si email vide ou déjà existant (unique) dans optimized
     """
     if not ids:
-        return {"moved_to_silver": 0, "skipped": 0, "details": []}
+        return {"moved_to_optimized": 0, "skipped": 0, "details": []}
 
     try:
         # pattern depuis app_settings si non fourni
@@ -100,7 +100,7 @@ def SteagingAppliqueToSilver(db: Session, ids: list[int], pattern: str | None = 
         leads = db.query(SteagingApplique).filter(SteagingApplique.id.in_(ids)).all()
         moved = 0
         skipped = 0
-        deleted_already_in_silver = 0
+        deleted_already_in_optimized = 0
         details: list[dict] = []
         moved_ids: list[int] = []
         deleted_ids: list[int] = []
@@ -143,7 +143,7 @@ def SteagingAppliqueToSilver(db: Session, ids: list[int], pattern: str | None = 
 
         for l in leads:
             try:
-                # Email vérifié comme non disponible -> on n'envoie pas vers Silver
+                # Email vérifié comme non disponible -> on n'envoie pas vers Optimized
                 if str(getattr(l, "statu", "") or "").strip().lower() == "non disponible":
                     skipped += 1
                     details.append({"id": l.id, "reason": "email_non_disponible"})
@@ -182,10 +182,10 @@ def SteagingAppliqueToSilver(db: Session, ids: list[int], pattern: str | None = 
                 if exists:
                     # L'utilisateur veut que ce lead disparaisse de staging_leads
                     db.delete(l)
-                    deleted_already_in_silver += 1
+                    deleted_already_in_optimized += 1
                     deleted_ids.append(int(l.id))
                     _delete_duplicates_for(l.id, email, l.nom, l.prenom, l.societe)
-                    details.append({"id": l.id, "reason": "deleted_already_in_silver"})
+                    details.append({"id": l.id, "reason": "deleted_already_in_optimized"})
                     continue
 
                 obj = Leads(
@@ -210,9 +210,9 @@ def SteagingAppliqueToSilver(db: Session, ids: list[int], pattern: str | None = 
 
         db.commit()
         return {
-            "moved_to_silver": moved,
+            "moved_to_optimized": moved,
             "moved_ids": moved_ids,
-            "deleted_already_in_silver": deleted_already_in_silver,
+            "deleted_already_in_optimized": deleted_already_in_optimized,
             "deleted_ids": deleted_ids,
             "deleted_duplicates": deleted_duplicates,
             "skipped": skipped,
@@ -232,11 +232,11 @@ def _filtre_completion(db: Session, operateur: str):
 def GetAllLeads(db:Session):
     """Table unifiée : tous les leads. La complétion est calculée côté front."""
     return db.query(Leads).all()
-def GetAllSilver(db:Session):
+def GetAllIncomplete(db:Session):
     """Vue rétro-compatible : les leads incomplets (< 100%)."""
     return _filtre_completion(db, "< 100").all()
-def GetAllGold(db:Session):
-    """Vue rétro-compatible : les leads complets (Gold, 100%)."""
+def GetAllComplete(db:Session):
+    """Vue rétro-compatible : les leads complets (100%)."""
     return _filtre_completion(db, "= 100").all()
 def GetAllBlack(db:Session):
     return db.query(blacklistLeads).all()
@@ -285,7 +285,7 @@ def ExportDatabaseZip(db: Session, is_manager: bool):
         "import_leads",
         "staging_import_history",
         "cleaning_leads",
-        "leads",
+        "optimized",
         "blacklist_leads",
         "staging_leads",
         "statistic_leads",
@@ -396,7 +396,7 @@ def CountLastImportAlreadyProcessedInApplique(db: Session, filename: str, userid
         # Ne pas casser l'upload si ce check échoue
         return 0
 
-def UpdateSilverEmail(db: Session, lead_id: int, email: str):
+def UpdateOptimizedEmail(db: Session, lead_id: int, email: str):
     try:
         cleaned = NettoyerUnEmail(email)
         if not cleaned:
@@ -404,7 +404,7 @@ def UpdateSilverEmail(db: Session, lead_id: int, email: str):
 
         lead = db.query(Leads).filter(Leads.id == lead_id).first()
         if not lead:
-            raise HTTPException(status_code=404, detail="Lead silver introuvable")
+            raise HTTPException(status_code=404, detail="Lead introuvable")
 
         lead.email = cleaned
         db.commit()
@@ -493,17 +493,17 @@ def GetAllStagingImportHistory(db: Session, userid: str | None = None):
     history_rows = history_query.order_by(StagingImportHistory.imported_at.desc()).all()
 
     # Sets de matching en mémoire (beaucoup plus rapide que CASE/EXISTS corrélé).
-    # Silver/Gold sont la même table `leads` : la destination se déduit de la
-    # complétion, calculée à la volée (elle n'est pas stockée).
-    _gold_q = _filtre_completion(db, "= 100")
-    _silver_q = _filtre_completion(db, "< 100")
-    gold_emails = {norm(l.email) for l in _gold_q.all() if norm(l.email)}
-    silver_emails = {norm(l.email) for l in _silver_q.all() if norm(l.email)}
+    # Incomplete/Complete sont la même table `optimized` : la destination se
+    # déduit de la complétion, calculée à la volée (elle n'est pas stockée).
+    _complete_q = _filtre_completion(db, "= 100")
+    _incomplete_q = _filtre_completion(db, "< 100")
+    complete_emails = {norm(l.email) for l in _complete_q.all() if norm(l.email)}
+    incomplete_emails = {norm(l.email) for l in _incomplete_q.all() if norm(l.email)}
     clean_emails = {norm(x[0]) for x in db.query(cleaningleads.email).all() if norm(x[0])}
     blacklist_emails = {norm(x[0]) for x in db.query(blacklistLeads.email).all() if norm(x[0])}
 
-    gold_keys = {(norm(l.nom), norm(l.prenom), norm(l.societe)) for l in _gold_q.all()}
-    silver_keys = {(norm(l.nom), norm(l.prenom), norm(l.societe)) for l in _silver_q.all()}
+    complete_keys = {(norm(l.nom), norm(l.prenom), norm(l.societe)) for l in _complete_q.all()}
+    incomplete_keys = {(norm(l.nom), norm(l.prenom), norm(l.societe)) for l in _incomplete_q.all()}
     clean_keys = {(norm(r.nom), norm(r.prenom), norm(r.societe)) for r in db.query(cleaningleads.nom, cleaningleads.prenom, cleaningleads.societe).all()}
 
     enriched = []
@@ -516,19 +516,19 @@ def GetAllStagingImportHistory(db: Session, userid: str | None = None):
             continue
 
         if email_key:
-            if email_key in gold_emails:
-                destination = "gold"
-            elif email_key in silver_emails:
-                destination = "silver"
+            if email_key in complete_emails:
+                destination = "complete"
+            elif email_key in incomplete_emails:
+                destination = "incomplete"
             elif email_key in clean_emails:
                 destination = "clean"
             else:
                 destination = "staging"
         else:
-            if tuple_key in gold_keys:
-                destination = "gold"
-            elif tuple_key in silver_keys:
-                destination = "silver"
+            if tuple_key in complete_keys:
+                destination = "complete"
+            elif tuple_key in incomplete_keys:
+                destination = "incomplete"
             elif tuple_key in clean_keys:
                 destination = "clean"
             else:
@@ -557,9 +557,9 @@ def DownloadProdLeadCSV(types:str,db: Session, ids: list[int] | None = None):
         if ids:
             # Sélection explicite envoyée par le front (ex: les leads à 100%)
             leads = db.query(Leads).filter(Leads.id.in_(ids)).all()
-        elif(types=="silver"):
+        elif(types=="incomplete"):
             leads = _filtre_completion(db, "< 100").all()
-        elif(types=="gold"):
+        elif(types=="complete"):
             leads = _filtre_completion(db, "= 100").all()
         else:
             leads = db.query(Leads).all()
@@ -608,7 +608,7 @@ def DownloadProdLeadCSV(types:str,db: Session, ids: list[int] | None = None):
         output.seek(0)
         
         # 6️⃣ Nom du fichier avec timestamp
-        filename = f"leads_silver_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        filename = f"leads_optimized_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
         
         # 7️⃣ Retourner le fichier
         return StreamingResponse(
@@ -629,9 +629,9 @@ def DownloadLeadXlsx(types:str,db: Session, ids: list[int] | None = None):
         if ids:
             # Sélection explicite envoyée par le front (ex: les leads à 100%)
             leads = db.query(Leads).filter(Leads.id.in_(ids)).all()
-        elif(types=="silver"):
+        elif(types=="incomplete"):
             leads = _filtre_completion(db, "< 100").all()
-        elif(types=="gold"):
+        elif(types=="complete"):
             leads = _filtre_completion(db, "= 100").all()
         else:
             leads = db.query(Leads).all()
@@ -642,7 +642,7 @@ def DownloadLeadXlsx(types:str,db: Session, ids: list[int] | None = None):
         # 2️⃣ Créer le workbook
         wb = Workbook()
         sheet = wb.active
-        sheet.title = "Leads Silver"
+        sheet.title = "Leads Optimized"
         
         # 3️⃣ En-têtes
         headers = ["Nom", "Prénom", "Email", "Fonction", "Société", "Téléphone", "LinkedIn", "Location"]
@@ -709,7 +709,7 @@ def DownloadLeadXlsx(types:str,db: Session, ids: list[int] | None = None):
         output.seek(0)
         
         # 🔟 Retourner le fichier
-        filename = f"leads_silver_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        filename = f"leads_optimized_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
         
         return StreamingResponse(
             output,
@@ -894,25 +894,25 @@ def ToBlack(id:int,eliminer:str,db:Session):
             "message": "Le leads a èté blocque avec succeè"
         }
     
-def StagingToSilver(db: Session,base:str):
+def StagingToIncomplete(db: Session,base:str):
     try:
-        # 1️⃣ INSERT INTO leads depuis staging (évite les doublons)
+        # 1️⃣ INSERT INTO optimized depuis staging (évite les doublons)
         result = db.execute(text(f"""
-            INSERT INTO leads (nom, prenom, email, fonction, societe, telephone, linkedin, location)
-            SELECT DISTINCT ON (email) 
+            INSERT INTO optimized (nom, prenom, email, fonction, societe, telephone, linkedin, location)
+            SELECT DISTINCT ON (email)
                 nom, prenom, email, fonction, societe, telephone, linkedin, location
             FROM {base}
-            WHERE email IS NOT NULL 
-              AND email != '' 
+            WHERE email IS NOT NULL
+              AND email != ''
               AND email != 'nan'
-              AND nom IS NOT NULL 
-              AND nom != '' 
+              AND nom IS NOT NULL
+              AND nom != ''
               AND nom != 'nan'
-              AND prenom IS NOT NULL 
-              AND prenom != '' 
+              AND prenom IS NOT NULL
+              AND prenom != ''
               AND prenom != 'nan'
-              AND societe IS NOT NULL 
-              AND societe != '' 
+              AND societe IS NOT NULL
+              AND societe != ''
               AND societe != 'nan'
               AND (
                   fonction IS NULL OR fonction = '' OR fonction = 'nan'
@@ -920,7 +920,7 @@ def StagingToSilver(db: Session,base:str):
                   OR linkedin IS NULL OR linkedin = '' OR linkedin = 'nan'
               )
               AND NOT EXISTS (
-                  SELECT 1 FROM leads s WHERE s.email = {base}.email
+                  SELECT 1 FROM optimized s WHERE s.email = {base}.email
               )
             ORDER BY email, id
         """))
@@ -951,8 +951,8 @@ def StagingToSilver(db: Session,base:str):
         
         db.commit()
         
-        print(f"✅ {moved_count} leads déplacés vers Silver")
-        return {"moved_to_silver": moved_count}
+        print(f"✅ {moved_count} leads déplacés vers Optimized (incomplete)")
+        return {"moved_to_incomplete": moved_count}
 
     except SQLAlchemyError as e:
         db.rollback()
@@ -1081,12 +1081,12 @@ def StagingToSteagingApplique(db: Session, base: str):
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Erreur inattendue : {str(e)}")
 
-def StagingToGold(db: Session,base:str):
+def StagingToComplete(db: Session,base:str):
     try:
-        
-        #  INSERT INTO leads depuis staging (évite les doublons)
+
+        #  INSERT INTO optimized depuis staging (évite les doublons)
         result = db.execute(text(f"""
-            INSERT INTO leads (nom, prenom, email, fonction, societe, telephone, linkedin, location)
+            INSERT INTO optimized (nom, prenom, email, fonction, societe, telephone, linkedin, location)
             SELECT DISTINCT ON (email) 
                 nom, prenom, email, fonction, societe, telephone, linkedin, location
             FROM {base}
@@ -1115,7 +1115,7 @@ def StagingToGold(db: Session,base:str):
               AND location != ''
               AND location != 'nan'
               AND NOT EXISTS (
-                  SELECT 1 FROM leads g WHERE g.email = {base}.email
+                  SELECT 1 FROM optimized c WHERE c.email = {base}.email
               )
             ORDER BY email, id
         """))
@@ -1153,8 +1153,8 @@ def StagingToGold(db: Session,base:str):
         
         db.commit()
         
-        print(f"✅ {moved_count} leads déplacés vers Gold")
-        return {"moved_to_gold": moved_count}
+        print(f"✅ {moved_count} leads déplacés vers Optimized (complete)")
+        return {"moved_to_complete": moved_count}
 
     except SQLAlchemyError as e:
         db.rollback()
@@ -1262,9 +1262,9 @@ def CompleteNomPrenomFromEmail(db: Session,base:str):
         raise HTTPException(status_code=500, detail=f"Erreur inattendue : {str(e)}")
 
 
-def SilverToGold(db:Session,id:int):
-    """Fusion Silver+Gold : il n'y a plus de déplacement entre tables.
-    La complétion est calculée à la volée ; le lead est Gold si elle vaut 100%."""
+def CheckLeadComplete(db:Session,id:int):
+    """Il n'y a plus de déplacement entre tables : la complétion est calculée
+    à la volée, et un lead est "complet" si elle vaut 100%."""
     from service.service import sql_completion_expr
     try:
             lead = db.query(Leads).filter(Leads.id == id).first()
@@ -1272,19 +1272,19 @@ def SilverToGold(db:Session,id:int):
                 raise HTTPException(status_code=404, detail="Lead introuvable")
 
             completion = int(db.execute(
-                text(f"SELECT {sql_completion_expr()} FROM leads WHERE id = :id"),
+                text(f"SELECT {sql_completion_expr()} FROM optimized WHERE id = :id"),
                 {"id": id},
             ).scalar() or 0)
 
             if completion < 100:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Lead incomplet ({completion}%) → impossible de passer en GOLD",
+                    detail=f"Lead incomplet ({completion}%) → impossible de passer en Complete",
                 )
             return {
-                "message": "Lead Gold (100% complété)",
+                "message": "Lead complet (100%)",
                 "completion": completion,
-                "gold": True,
+                "complete": True,
             }
 
     except HTTPException:
@@ -1700,43 +1700,50 @@ def _find_region_ville(location: str) -> tuple[str, str]:
     return "", ""
 
 
-def Rephrase(db: Session, base: str = "leads"):
+def _reformuler_location(location) -> str | None:
+    """
+    Reformule une valeur de location au format "Ville, Région, France".
+    Retourne la nouvelle valeur si elle diffère de l'actuelle, sinon None
+    (rien à changer). Ne touche pas à la base — appelant responsable du commit.
+    """
+    if not location or str(location).lower() in ("", "nan", "none"):
+        return None
+
+    region, ville = _find_region_ville(location)
+
+    if region and ville:
+        new_location = f"{ville}, {region}, France"
+    else:
+        parts = location.strip().split()
+        if len(parts) == 3:
+            new_location = f"{parts[0]}, {parts[1]}, {parts[2]}"
+        else:
+            return None
+
+    return new_location if new_location != location else None
+
+
+def Rephrase(db: Session, base: str = "optimized"):
     """
     Reformule le champ location avec le format: City, Region, Country
     Exemple: "Paris, Ile-de-France, France"
     """
     try:
-        if "silver" in base.lower():
-            leads = db.query(Leads).all()
-        else:
-            leads = db.query(Leads).all()
-        
+        leads = db.query(Leads).all()
+
         updated_count = 0
-        
+
         for lead in leads:
-            if not lead.location or lead.location.lower() in ("", "nan", "none"):
-                continue
-
-            region, ville = _find_region_ville(lead.location)
-
-            if region and ville:
-                new_location = f"{ville}, {region}, France"
-            else:
-                parts = lead.location.strip().split()
-                if len(parts) == 3:
-                    new_location = f"{parts[0]}, {parts[1]}, {parts[2]}"
-                else:
-                    continue
-
-            if lead.location != new_location:
+            new_location = _reformuler_location(lead.location)
+            if new_location:
                 lead.location = new_location
                 updated_count += 1
-        
+
         db.commit()
-        
+
         print(f"✅ {updated_count} locations reformulées")
         return {"reformulated": updated_count}
-    
+
     except SQLAlchemyError as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Erreur base de données : {str(e)}")
@@ -1839,7 +1846,7 @@ def smtp_probe(email_addr: str, timeout: int = 8) -> dict:
 
 
 def _apply_statu(db: Session, to_email: str, statu: str):
-    """Met à jour le statut sur silver/gold (par email) + tous les leads applique correspondants."""
+    """Met à jour le statut sur optimized (par email) + tous les leads applique correspondants."""
     lead = db.query(Leads).filter(Leads.email == to_email).first()
     if not lead:
         lead = db.query(Leads).filter(Leads.email == to_email).first()
@@ -2057,6 +2064,10 @@ def send_and_check_bulk(emails: list, db: Session = None, attente: int = 20) -> 
 VERIFY_JOBS: dict = {}
 _JOBS_LOCK = threading.Lock()
 _VERIFY_WORKERS = 100
+# Envoi RÉEL : chaque worker ouvre sa propre connexion SMTP + attend un bounce
+# individuellement. Nombre limité pour ne pas cumuler trop d'envois simultanés
+# (contrairement à la sonde SMTP silencieuse, qui elle ne fait aucun envoi).
+_REAL_SEND_WORKERS = 5
 
 
 def _verify_lead_task(lead_id: int, company_map: dict) -> tuple:
@@ -2075,51 +2086,148 @@ def _verify_lead_task(lead_id: int, company_map: dict) -> tuple:
         db.close()
 
 
-def _run_verify_job(job_id: str, ids: list, auto_promote: bool = False):
-    # snapshot du map société (lecture unique)
-    db0 = SessionLocal()
-    try:
-        company_map = _company_map_regex_patterne(db0)
-    finally:
-        db0.close()
+def _verify_and_promote_real(lead_id: int, company_map: dict) -> tuple:
+    """
+    Vérifie un lead par envoi RÉEL (comme le bouton « Vérifier email »), dans
+    sa propre session et son propre thread : chaque lead a son propre cycle
+    envoi -> attente bounce -> statut, indépendant des autres (asynchrone,
+    pas de blocage sur le lot entier). Dès qu'il ressort "disponible", il est
+    promu vers `optimized` immédiatement, sans attendre la fin des autres.
 
-    disponible_ids: list = []
+    Retourne (lead_id, statut, promoted: bool).
+    """
+    db = SessionLocal()
     try:
-        with ThreadPoolExecutor(max_workers=_VERIFY_WORKERS) as pool:
-            futures = {pool.submit(_verify_lead_task, i, company_map): i for i in ids}
-            for fut in as_completed(futures):
-                lead_id, statu = fut.result()
-                with _JOBS_LOCK:
-                    job = VERIFY_JOBS.get(job_id)
-                    if not job:
-                        continue
-                    job["done"] += 1
-                    if statu == "disponible":
-                        job["disponible"] += 1
-                        disponible_ids.append(lead_id)
-                    elif statu == "non disponible":
-                        job["non_disponible"] += 1
-                    else:
-                        job["erreurs"] += 1
+        lead = db.query(SteagingApplique).filter(SteagingApplique.id == lead_id).first()
+        if not lead:
+            return (lead_id, "introuvable", False)
+
+        cible, _conforme, _regenere = _resolve_target_email(db, lead, dict(company_map))
+        if not cible:
+            return (lead_id, "non disponible", False)
+
+        res = send_and_check(cible, db)  # envoi réel + attente bounce ; met aussi statu à jour
+        statu = "disponible" if int(res.get("code", 0) or 0) == 250 else "non disponible"
+
+        promoted = False
+        if statu == "disponible":
+            # Reformater location AVANT l'envoi vers optimized (pas après).
+            try:
+                new_location = _reformuler_location(lead.location)
+                if new_location:
+                    lead.location = new_location
+                    db.commit()
+            except Exception:
+                db.rollback()
+
+            try:
+                out = SteagingAppliqueToOptimized(db, ids=[lead_id])
+                promoted = int(out.get("moved_to_optimized", 0) or 0) > 0
+            except Exception:
+                promoted = False
+
+        return (lead_id, statu, promoted)
+    except Exception:
+        db.rollback()
+        return (lead_id, "erreur", False)
+    finally:
+        db.close()
+
+
+def _run_verify_job(job_id: str, ids: list, auto_promote: bool = False, envoyer_test: bool = False):
+    disponible_ids: list = []
+    any_promoted = False
+    try:
+        if envoyer_test:
+            # Envoi RÉEL, mais asynchrone par lead : chaque lead a son propre
+            # cycle envoi -> attente bounce -> statut -> promotion immédiate
+            # si disponible, indépendamment des autres (pas d'attente sur le
+            # lot entier). Concurrence limitée pour ne pas cumuler trop
+            # d'envois SMTP simultanés.
+            db0 = SessionLocal()
+            try:
+                company_map = _company_map_regex_patterne(db0)
+            finally:
+                db0.close()
+
+            with ThreadPoolExecutor(max_workers=_REAL_SEND_WORKERS) as pool:
+                futures = {pool.submit(_verify_and_promote_real, i, company_map): i for i in ids}
+                for fut in as_completed(futures):
+                    lead_id, statu, promoted = fut.result()
+                    if promoted:
+                        any_promoted = True
+                    with _JOBS_LOCK:
+                        job = VERIFY_JOBS.get(job_id)
+                        if not job:
+                            continue
+                        job["done"] += 1
+                        if statu == "disponible":
+                            job["disponible"] += 1
+                            if promoted:
+                                job["moved_to_leads"] = int(job.get("moved_to_leads", 0)) + 1
+                        elif statu == "non disponible":
+                            job["non_disponible"] += 1
+                        else:
+                            job["erreurs"] += 1
+        else:
+            # snapshot du map société (lecture unique)
+            db0 = SessionLocal()
+            try:
+                company_map = _company_map_regex_patterne(db0)
+            finally:
+                db0.close()
+
+            with ThreadPoolExecutor(max_workers=_VERIFY_WORKERS) as pool:
+                futures = {pool.submit(_verify_lead_task, i, company_map): i for i in ids}
+                for fut in as_completed(futures):
+                    lead_id, statu = fut.result()
+                    with _JOBS_LOCK:
+                        job = VERIFY_JOBS.get(job_id)
+                        if not job:
+                            continue
+                        job["done"] += 1
+                        if statu == "disponible":
+                            job["disponible"] += 1
+                            disponible_ids.append(lead_id)
+                        elif statu == "non disponible":
+                            job["non_disponible"] += 1
+                        else:
+                            job["erreurs"] += 1
     finally:
         promoted = {}
+        # Chemin sonde (envoyer_test=False) : la promotion se fait encore en
+        # un lot, à la fin, sur les ids collectés pendant la boucle.
         if auto_promote and disponible_ids:
             db1 = SessionLocal()
             try:
-                promoted = SteagingAppliqueToSilver(db1, ids=disponible_ids)
-                if int(promoted.get("moved_to_silver", 0) or 0) > 0:
-                    Rephrase(db1, "leads")
+                promoted = SteagingAppliqueToOptimized(db1, ids=disponible_ids)
+                if int(promoted.get("moved_to_optimized", 0) or 0) > 0:
+                    any_promoted = True
             except Exception:
                 promoted = {}
             finally:
                 db1.close()
+
+        # Chemin envoi réel (envoyer_test=True) : chaque lead a déjà été promu
+        # individuellement dans _verify_and_promote_real. On reformate juste
+        # `location` une seule fois si au moins une promotion a eu lieu.
+        if any_promoted:
+            db2 = SessionLocal()
+            try:
+                Rephrase(db2, "optimized")
+            except Exception:
+                pass
+            finally:
+                db2.close()
+
         with _JOBS_LOCK:
             if job_id in VERIFY_JOBS:
                 VERIFY_JOBS[job_id]["status"] = "done"
-                VERIFY_JOBS[job_id]["moved_to_leads"] = int(promoted.get("moved_to_silver", 0) or 0)
+                if promoted:
+                    VERIFY_JOBS[job_id]["moved_to_leads"] = int(promoted.get("moved_to_optimized", 0) or 0)
 
 
-def start_verify_job(ids: list, auto_promote: bool = False) -> dict:
+def start_verify_job(ids: list, auto_promote: bool = False, envoyer_test: bool = False) -> dict:
     ids = [int(i) for i in (ids or []) if str(i).strip() != ""]
     job_id = uuid.uuid4().hex
     with _JOBS_LOCK:
@@ -2129,7 +2237,7 @@ def start_verify_job(ids: list, auto_promote: bool = False) -> dict:
             "moved_to_leads": 0,
         }
     if ids:
-        threading.Thread(target=_run_verify_job, args=(job_id, ids, auto_promote), daemon=True).start()
+        threading.Thread(target=_run_verify_job, args=(job_id, ids, auto_promote, envoyer_test), daemon=True).start()
     else:
         with _JOBS_LOCK:
             VERIFY_JOBS[job_id]["status"] = "done"
@@ -2139,13 +2247,14 @@ def start_verify_job(ids: list, auto_promote: bool = False) -> dict:
 def trigger_auto_verify_unverified_staging(db: Session) -> dict:
     """
     Déclenché quand des leads viennent d'être déposés dans staging_leads
-    (ex: fin d'un import) : vérifie en arrière-plan tous les emails de
+    (ex: fin d'un import) : envoie un vrai email de test (comme le bouton
+    « Vérifier email », mais groupé sur tout le lot) à tous les emails de
     staging_leads sans statut (statu IS NULL), puis déplace automatiquement
-    vers `leads` ceux qui ressortent "disponible".
+    vers `optimized` ceux qui ressortent "disponible".
     """
     rows = db.execute(text("SELECT id FROM staging_leads WHERE statu IS NULL")).fetchall()
     ids = [int(r[0]) for r in rows]
-    return start_verify_job(ids, auto_promote=True)
+    return start_verify_job(ids, auto_promote=True, envoyer_test=True)
 
 
 def get_verify_job(job_id: str) -> dict:
@@ -2224,18 +2333,16 @@ def _autoadd_societe_from_email(db: Session, nom_soc: str, email: str, prenom, n
         return None
 
 
-def _verify_one_applique(db: Session, lead, company_map: dict, envoyer_test: bool = False) -> dict:
+def _resolve_target_email(db: Session, lead, company_map: dict) -> tuple:
     """
-    Flux de vérification :
-    1) On confronte l'email du lead au patterne de sa société (via la regex stockée) :
-       - conforme     -> on garde l'email du lead tel quel
-       - non conforme -> on le régénère depuis le patterne
-    2) On teste l'adresse retenue :
-       - envoyer_test=True  -> envoi d'un VRAI email de test + attente d'un bounce
-                               (250 = aucun rejet -> disponible)
-       - envoyer_test=False -> sonde SMTP RCPT, aucun envoi (utilisé par la
-                               vérification de masse : 100 envois simultanés
-                               feraient suspendre le compte SMTP).
+    Étape 1 commune à toute vérification (envoi réel ou sonde) : confronte
+    l'email du lead au patterne de sa société, le régénère si besoin.
+    Met à jour lead.email en base si la cible diffère. Ne fait AUCUN test
+    réseau ici.
+
+    Retourne (cible, conforme, regenere). cible == "" si aucune adresse
+    exploitable n'a pu être déterminée — dans ce cas le lead est déjà marqué
+    "non disponible" et le commit déjà fait.
     """
     email = (lead.email or "").strip().lower()
     nom_soc = (lead.societe or "").strip()
@@ -2244,7 +2351,6 @@ def _verify_one_applique(db: Session, lead, company_map: dict, envoyer_test: boo
     patternes = _split_lines(patterne_raw)
     regexes = _split_lines(regex_raw)
 
-    # 1) L'email du lead correspond-il au patterne de sa société ?
     conforme = False
     for rgx in regexes:
         try:
@@ -2270,11 +2376,33 @@ def _verify_one_applique(db: Session, lead, company_map: dict, envoyer_test: boo
     if not cible or "@" not in cible:
         lead.statu = "non disponible"
         db.commit()
-        return {"id": lead.id, "email": cible, "statu": "non disponible",
-                "regenerated": False, "conforme": conforme, "trusted": False}
+        return "", conforme, regenere
 
     lead.email = cible
     db.commit()
+    return cible, conforme, regenere
+
+
+def _verify_one_applique(db: Session, lead, company_map: dict, envoyer_test: bool = False) -> dict:
+    """
+    Flux de vérification :
+    1) On confronte l'email du lead au patterne de sa société (via la regex stockée) :
+       - conforme     -> on garde l'email du lead tel quel
+       - non conforme -> on le régénère depuis le patterne
+    2) On teste l'adresse retenue :
+       - envoyer_test=True  -> envoi d'un VRAI email de test + attente d'un bounce
+                               (250 = aucun rejet -> disponible)
+       - envoyer_test=False -> sonde SMTP RCPT, aucun envoi (utilisé par la
+                               vérification de masse : 100 envois simultanés
+                               feraient suspendre le compte SMTP).
+    """
+    cible, conforme, regenere = _resolve_target_email(db, lead, company_map)
+    nom_soc = (lead.societe or "").strip()
+    key = _norm_company_key(nom_soc)
+
+    if not cible:
+        return {"id": lead.id, "email": cible, "statu": "non disponible",
+                "regenerated": False, "conforme": conforme, "trusted": False}
 
     # 2) Test de l'adresse retenue
     if envoyer_test:
@@ -2326,7 +2454,7 @@ def VerifyAppliqueBulk(db: Session, ids: list) -> dict:
 def GenerateAppliqueEmail(db: Session, lead_id: int) -> dict:
     """
     Génère l'email d'un lead applique depuis le 1er patterne de sa société et le sauvegarde.
-    PAS de vérification SMTP, PAS d'envoi vers Silver — simple remplissage.
+    PAS de vérification SMTP, PAS d'envoi vers Optimized — simple remplissage.
     """
     lead = db.query(SteagingApplique).filter(SteagingApplique.id == lead_id).first()
     if not lead:

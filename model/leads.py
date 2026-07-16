@@ -8,13 +8,13 @@ class Leads(Base):
     La complétion (part des 8 champs renseignés, 12,5% par champ) n'est PAS
     stockée : elle se calcule à partir des champs eux-mêmes — côté front pour
     l'affichage, et en SQL (voir sql_completion_expr) quand le backend doit
-    distinguer Gold (100%) de Silver (< 100%).
+    distinguer Complete (100%) de Incomplete (< 100%).
 
     Attention : `statu` n'est PAS le niveau de qualité, c'est le statut de
     vérification de l'email ('disponible' / 'non disponible' / 'erreur').
     """
 
-    __tablename__ = "leads"
+    __tablename__ = "optimized"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
 

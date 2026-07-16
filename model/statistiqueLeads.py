@@ -15,12 +15,12 @@ class StatisticLeads(Base):
 
     blacklisted_removed = Column(Integer)
 
-    moved_to_silver = Column(Integer)
+    moved_to_incomplete = Column(Integer)
     moved_to_clean = Column(Integer)
-    moved_to_gold = Column(Integer)
+    moved_to_complete = Column(Integer)
 
-    staging_vs_silver = Column(Integer)
-    staging_vs_gold = Column(Integer)
+    staging_vs_incomplete = Column(Integer)
+    staging_vs_complete = Column(Integer)
     staging_vs_applique = Column(Integer)
     staging_internal = Column(Integer)
 

@@ -5,19 +5,19 @@ from database.db import get_db
 from service.service import *
 import service.serviceSociete as Ss
 router=APIRouter()
-@router.get("/leads")
+@router.get("/optimized")
 async def GetAllLeads(db: Session = Depends(get_db)):
-        """Table unifiée (fusion Silver + Gold). La complétion n'est pas stockée :
-        le front la calcule à partir des 8 champs (100% => Gold)."""
+        """Table unifiée. La complétion n'est pas stockée :
+        le front la calcule à partir des 8 champs (100% => Complete)."""
         return SP.GetAllLeads(db)
-@router.get("/silver")
-async def GetAllsilver(db: Session = Depends(get_db)):
+@router.get("/incomplete")
+async def GetAllIncomplete(db: Session = Depends(get_db)):
         """Rétro-compatible : vue filtrée des leads incomplets (< 100%)."""
-        return SP.GetAllSilver(db)
-@router.get("/gold")
-async def GetAllGold(db: Session = Depends(get_db)):
-        """Rétro-compatible : vue filtrée des leads complets (Gold, 100%)."""
-        return SP.GetAllGold(db)
+        return SP.GetAllIncomplete(db)
+@router.get("/complete")
+async def GetAllComplete(db: Session = Depends(get_db)):
+        """Rétro-compatible : vue filtrée des leads complets (100%)."""
+        return SP.GetAllComplete(db)
 @router.get("/black")
 async def GetAllBlack(db: Session = Depends(get_db)):
         return SP.GetAllBlack(db)
@@ -51,14 +51,14 @@ async def DeleteClean(payload = Body(...), db: Session = Depends(get_db)):
 async def GetAllSteagingApplique(db: Session = Depends(get_db)):
         return SP.GetAllSteagingApplique(db)
 
-@router.post("/staging/to-silver")
-async def SteagingAppliqueToSilver(payload = Body(...), db: Session = Depends(get_db)):
+@router.post("/staging/to-optimized")
+async def SteagingAppliqueToOptimized(payload = Body(...), db: Session = Depends(get_db)):
         ids = []
         pattern = None
         if isinstance(payload, dict):
                 ids = payload.get("ids") or []
                 pattern = payload.get("pattern")
-        return SP.SteagingAppliqueToSilver(db, ids=ids, pattern=pattern)
+        return SP.SteagingAppliqueToOptimized(db, ids=ids, pattern=pattern)
 
 @router.post("/staging/verify/{id}")
 def verify_applique_lead(id: int, db: Session = Depends(get_db)):
@@ -128,11 +128,11 @@ async def StagingDispatch(base:str,payload = Body(...), db: Session = Depends(ge
         r3 = CheckContactsBlack(db,base)
         result.update(r3)
 
-        # Total supprimé = doublons (silver/gold/applique/interne) + blacklistés retirés
+        # Total supprimé = doublons (incomplete/complete/applique/interne) + blacklistés retirés
         try:
             result["total_deleted"] = (
-                int(result.get("staging_vs_silver", 0) or 0)
-                + int(result.get("staging_vs_gold", 0) or 0)
+                int(result.get("staging_vs_incomplete", 0) or 0)
+                + int(result.get("staging_vs_complete", 0) or 0)
                 + int(result.get("staging_vs_applique", 0) or 0)
                 + int(result.get("staging_internal", 0) or 0)
                 + int(result.get("blacklisted_removed", 0) or 0)
@@ -142,7 +142,7 @@ async def StagingDispatch(base:str,payload = Body(...), db: Session = Depends(ge
 
         db.expire_all()
 
-        # Tri Gold/Silver/Clean désactivé pour le moment : on ramène TOUS les leads
+        # Tri Complete/Incomplete/Clean désactivé pour le moment : on ramène TOUS les leads
         # (après nettoyage/complétion/déduplication) vers staging_leads.
         # StagingToSteagingApplique insère tout depuis {base} puis vide {base}.
         if base == "import_leads":
@@ -159,8 +159,8 @@ async def StagingDispatch(base:str,payload = Body(...), db: Session = Depends(ge
             result["auto_verify_job_id"] = verify_job.get("job_id")
             result["auto_verify_total"] = verify_job.get("total")
         # --- Tri par tables finales (à réactiver plus tard) ---
-        # r6 = SP.StagingToGold(db, base);  result.update(r6)
-        # r7 = SP.StagingToSilver(db, base); result.update(r7)
+        # r6 = SP.StagingToComplete(db, base);  result.update(r6)
+        # r7 = SP.StagingToIncomplete(db, base); result.update(r7)
         # r8 = SP.StagingToClean(db);        result.update(r8)
         # r10 = SP.ClearBaseTable(db, base); result.update(r10)
 
@@ -185,12 +185,12 @@ async def StagingDispatch(base:str,payload = Body(...), db: Session = Depends(ge
         print("ERREUR COMPLETE:", traceback.format_exc())
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.get("/togold/{id}")
-async def silvertogold(id:int,db:Session=Depends(get_db)):
-        return  SP.SilverToGold(db,id)
+@router.get("/tocomplete/{id}")
+async def checkleadcomplete(id:int,db:Session=Depends(get_db)):
+        return  SP.CheckLeadComplete(db,id)
 
-@router.post("/silver/complete-email")
-async def complete_silver_email(payload = Body(...), db: Session = Depends(get_db)):
+@router.post("/optimized/complete-email")
+async def complete_optimized_email(payload = Body(...), db: Session = Depends(get_db)):
     try:
         pattern = None
         overwrite = True
@@ -200,11 +200,11 @@ async def complete_silver_email(payload = Body(...), db: Session = Depends(get_d
                 overwrite = bool(payload.get("overwrite"))
         else:
             pattern = payload
-        # 1) Appliquer le pattern sur leads
-        result = CompleteEmail(db, "leads", pattern=pattern, overwrite=overwrite)
+        # 1) Appliquer le pattern sur optimized
+        result = CompleteEmail(db, "optimized", pattern=pattern, overwrite=overwrite)
         # 2) Après application, enregistrer automatiquement les sociétés manquantes
-        # (si societe existe dans leads mais pas encore dans societe_leads)
-        added = Ss.AddAuto(db, "leads")
+        # (si societe existe dans optimized mais pas encore dans societe_leads)
+        added = Ss.AddAuto(db, "optimized")
         if isinstance(added, dict) and "added_societes" in added:
             result["added_societes"] = int(added.get("added_societes", 0) or 0)
         return result
@@ -212,11 +212,11 @@ async def complete_silver_email(payload = Body(...), db: Session = Depends(get_d
         raise
     except Exception as e:
         import traceback
-        print("ERREUR /silver/complete-email:", traceback.format_exc())
+        print("ERREUR /optimized/complete-email:", traceback.format_exc())
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.get("/silver/email-collisions")
-async def preview_silver_email_collisions(
+@router.get("/optimized/email-collisions")
+async def preview_optimized_email_collisions(
     pattern: str | None = None,
     overwrite: bool = True,
     limit_emails: int = 50,
@@ -225,7 +225,7 @@ async def preview_silver_email_collisions(
 ):
     result = PreviewEmailCollisions(
         db,
-        "leads",
+        "optimized",
         pattern=pattern,
         overwrite=overwrite,
         limit_emails=limit_emails,
@@ -234,7 +234,7 @@ async def preview_silver_email_collisions(
     try:
         import json
 
-        print("JSON /silver/email-collisions:")
+        print("JSON /optimized/email-collisions:")
         print(json.dumps(result, ensure_ascii=False, indent=2))
     except Exception:
         # Ne pas bloquer la réponse si l'affichage échoue
@@ -256,38 +256,38 @@ async def save_email_pattern(payload = Body(...), db: Session = Depends(get_db))
         pattern = payload
     return SaveEmailPattern(db, str(pattern or ""), is_manager=is_manager)
 
-@router.put("/silver/{id}/email")
-async def update_silver_email(id: int, payload = Body(...), db: Session = Depends(get_db)):
+@router.put("/optimized/{id}/email")
+async def update_optimized_email(id: int, payload = Body(...), db: Session = Depends(get_db)):
     # payload attendu: { "email": "..." }
     email = None
     if isinstance(payload, dict):
         email = payload.get("email")
     else:
         email = payload
-    return SP.UpdateSilverEmail(db, id, str(email or ""))
+    return SP.UpdateOptimizedEmail(db, id, str(email or ""))
 def _ids_du_payload(payload) -> list[int]:
     ids = payload.get("ids") if isinstance(payload, dict) else None
     return [int(i) for i in (ids or []) if str(i).lstrip("-").isdigit()]
 
 
-@router.post("/leads/export-csv")
+@router.post("/optimized/export-csv")
 def export_leads_csv(payload = Body(...), db: Session = Depends(get_db)):
     """Exporte exactement les leads envoyés par le front (ex: ceux à 100%).
     La complétion étant calculée côté front, c'est lui qui fournit la sélection."""
-    return SP.DownloadProdLeadCSV("leads", db, ids=_ids_du_payload(payload))
+    return SP.DownloadProdLeadCSV("optimized", db, ids=_ids_du_payload(payload))
 
 
-@router.post("/leads/export-xlsx")
+@router.post("/optimized/export-xlsx")
 def export_leads_xlsx(payload = Body(...), db: Session = Depends(get_db)):
     """Idem en XLSX."""
-    return SP.DownloadLeadXlsx("leads", db, ids=_ids_du_payload(payload))
+    return SP.DownloadLeadXlsx("optimized", db, ids=_ids_du_payload(payload))
 
 
-@router.put("/leads/{id}/field")
+@router.put("/optimized/{id}/field")
 async def update_lead_field(id: int, payload = Body(...), db: Session = Depends(get_db)):
     """Édition inline d'un champ depuis le tableau Leads.
     payload attendu : { "field": "telephone", "value": "0601..." }
-    Renvoie la nouvelle `completion` du lead (100 => Gold)."""
+    Renvoie la nouvelle `completion` du lead (100 => Complete)."""
     field = ""
     value = None
     if isinstance(payload, dict):

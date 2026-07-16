@@ -33,6 +33,42 @@ with engine.begin() as conn:
         END $$;
     """))
 
+# Migration idempotente : renommage de la table "leads" -> "optimized"
+with engine.begin() as conn:
+    conn.execute(text("""
+        DO $$
+        BEGIN
+            IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name='leads')
+               AND NOT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name='optimized') THEN
+                ALTER TABLE leads RENAME TO optimized;
+            END IF;
+        END $$;
+    """))
+
+# Migration idempotente : renommage des colonnes stats "silver"/"gold" -> "incomplete"/"complete"
+with engine.begin() as conn:
+    conn.execute(text("""
+        DO $$
+        BEGIN
+            IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='statistic_leads' AND column_name='moved_to_silver')
+               AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='statistic_leads' AND column_name='moved_to_incomplete') THEN
+                ALTER TABLE statistic_leads RENAME COLUMN moved_to_silver TO moved_to_incomplete;
+            END IF;
+            IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='statistic_leads' AND column_name='moved_to_gold')
+               AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='statistic_leads' AND column_name='moved_to_complete') THEN
+                ALTER TABLE statistic_leads RENAME COLUMN moved_to_gold TO moved_to_complete;
+            END IF;
+            IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='statistic_leads' AND column_name='staging_vs_silver')
+               AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='statistic_leads' AND column_name='staging_vs_incomplete') THEN
+                ALTER TABLE statistic_leads RENAME COLUMN staging_vs_silver TO staging_vs_incomplete;
+            END IF;
+            IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='statistic_leads' AND column_name='staging_vs_gold')
+               AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='statistic_leads' AND column_name='staging_vs_complete') THEN
+                ALTER TABLE statistic_leads RENAME COLUMN staging_vs_gold TO staging_vs_complete;
+            END IF;
+        END $$;
+    """))
+
 Base.metadata.create_all(bind=engine)
 
 # Migration idempotente: societe_leads (domaine, extension) -> patterne
@@ -95,7 +131,7 @@ with engine.begin() as conn:
     """))
 
 # Migration idempotente : fusion silver_leads + gold_leads -> leads
-# Le niveau de qualité devient un pourcentage (completion, 8 champs) ; Gold = 100%.
+# Le niveau de qualité devient un pourcentage (completion, 8 champs) ; Complete = 100%.
 # Les anciennes tables sont CONSERVÉES en *_backup (aucun DROP de données) le temps de valider.
 
 with engine.begin() as conn:
@@ -106,14 +142,14 @@ with engine.begin() as conn:
         ).scalar())
 
     _cols = "email, nom, prenom, fonction, societe, telephone, linkedin, location, statu, created_at"
-    # Gold en premier : en cas de doublon d'email, la ligne la plus complète gagne.
+    # gold_leads en premier : en cas de doublon d'email, la ligne la plus complète gagne.
     for _src in ("gold_leads", "silver_leads"):
         if not _table_exists(_src):
             continue
         _n = conn.execute(text(f"SELECT COUNT(*) FROM {_src}")).scalar() or 0
         if _n:
             conn.execute(text(f"""
-                INSERT INTO leads ({_cols})
+                INSERT INTO optimized ({_cols})
                 SELECT {_cols} FROM {_src}
                 ON CONFLICT (email) DO NOTHING
             """))
@@ -126,7 +162,7 @@ with engine.begin() as conn:
 
     # La complétion n'est plus stockée : elle se calcule depuis les champs
     # (front pour l'affichage, sql_completion_expr côté SQL).
-    conn.execute(text("ALTER TABLE leads DROP COLUMN IF EXISTS completion"))
+    conn.execute(text("ALTER TABLE optimized DROP COLUMN IF EXISTS completion"))
 
 from util.auth import require_auth
 # Sécurité : toutes les routes exigent un token Clerk valide (si REQUIRE_AUTH=true)

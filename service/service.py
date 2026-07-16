@@ -235,7 +235,7 @@ def LoadFileToBd(file: UploadFile, db: Session, userid: Optional[str] = None, us
         raise HTTPException(status_code=500, detail=f"Erreur : {str(e)}")
 
 
-# --- Complétion des leads (fusion Silver + Gold) ---------------------------
+# --- Complétion des leads (Incomplete/Complete = même table optimized) ----
 # Les 8 champs qui comptent dans le pourcentage (12,5% chacun).
 COMPLETION_FIELDS = [
     "nom", "prenom", "email", "societe",
@@ -385,7 +385,7 @@ def LoadRowsToBd(rows, db: Session, userid: Optional[str] = None, username: Opti
 
 def SupprimerDoublonsMemetABLE(db: Session, table: str):
     try:
-        allowed_tables = {"import_leads", "cleaning_leads", "leads"}
+        allowed_tables = {"import_leads", "cleaning_leads", "optimized"}
         if table not in allowed_tables:
             raise HTTPException(status_code=400, detail=f"Table '{table}' non autorisée.")
 
@@ -419,15 +419,16 @@ def SupprimerDoublons(db: Session):
         results = {}
         total_deleted = 0
 
-        # Silver et Gold sont désormais la même table `leads` : on distingue les deux
-        # par la complétion (Gold = 100%) pour conserver le détail des statistiques.
+        # Incomplete et Complete sont désormais la même table `optimized` : on
+        # distingue les deux par la complétion (Complete = 100%) pour
+        # conserver le détail des statistiques.
         def _dedup_vs_leads(condition_completion: str) -> int:
             res = db.execute(text(f"""
                 DELETE FROM import_leads
                 WHERE id IN (
                     SELECT s.id
                     FROM import_leads s
-                    INNER JOIN leads l ON
+                    INNER JOIN optimized l ON
                         COALESCE(s.email, '') = COALESCE(l.email, '') AND
                         COALESCE(s.nom, '') = COALESCE(l.nom, '') AND
                         COALESCE(s.prenom, '') = COALESCE(l.prenom, '')
@@ -437,15 +438,15 @@ def SupprimerDoublons(db: Session):
             """))
             return res.rowcount if hasattr(res, "rowcount") else 0
 
-        staging_vs_gold = _dedup_vs_leads(f"{sql_completion_expr('l.')} = 100")
-        results["staging_vs_gold"] = staging_vs_gold
-        total_deleted += staging_vs_gold
-        print(f"✅ STAGING vs GOLD (leads 100%): {staging_vs_gold} doublons supprimés")
+        staging_vs_complete = _dedup_vs_leads(f"{sql_completion_expr('l.')} = 100")
+        results["staging_vs_complete"] = staging_vs_complete
+        total_deleted += staging_vs_complete
+        print(f"✅ STAGING vs COMPLETE (leads 100%): {staging_vs_complete} doublons supprimés")
 
-        staging_vs_silver = _dedup_vs_leads(f"{sql_completion_expr('l.')} < 100")
-        results["staging_vs_silver"] = staging_vs_silver
-        total_deleted += staging_vs_silver
-        print(f"✅ STAGING vs SILVER (leads < 100%): {staging_vs_silver} doublons supprimés")
+        staging_vs_incomplete = _dedup_vs_leads(f"{sql_completion_expr('l.')} < 100")
+        results["staging_vs_incomplete"] = staging_vs_incomplete
+        total_deleted += staging_vs_incomplete
+        print(f"✅ STAGING vs INCOMPLETE (leads < 100%): {staging_vs_incomplete} doublons supprimés")
 
         query_staging_applique = text("""
             DELETE FROM import_leads
@@ -491,8 +492,8 @@ def SupprimerDoublons(db: Session):
         return {
             "message": "Suppression des doublons terminée",
             "total_deleted": total_deleted,
-            "staging_vs_silver": staging_vs_silver,
-            "staging_vs_gold": staging_vs_gold,
+            "staging_vs_incomplete": staging_vs_incomplete,
+            "staging_vs_complete": staging_vs_complete,
             "staging_vs_applique": staging_vs_applique,
             "staging_internal": staging_internal
         }
@@ -1035,9 +1036,9 @@ def SaveStatic(db: Session,static:Static):
                 inserted_rows=static.inserted_rows if static.inserted_rows else 0,
                 emails_completed=static.emails_completed if static.emails_completed else 0,
                 blacklisted_removed=static.blacklisted_removed if static.blacklisted_removed else 0,
-                moved_to_silver=static.moved_to_silver if static.moved_to_silver else 0,
+                moved_to_incomplete=static.moved_to_incomplete if static.moved_to_incomplete else 0,
                 moved_to_clean=static.moved_to_clean if static.moved_to_clean else 0,
-                moved_to_gold=static.moved_to_gold if static.moved_to_gold else 0,
+                moved_to_complete=static.moved_to_complete if static.moved_to_complete else 0,
 )
         print("statics",statics)
         db.add(statics)
@@ -1062,20 +1063,20 @@ def updatestat(db: Session, result: dict):
 
     query = text("""
         UPDATE statistic_leads
-        SET 
-            moved_to_silver     = :moved_to_silver,
+        SET
+            moved_to_incomplete = :moved_to_incomplete,
             moved_to_clean      = :moved_to_clean,
-            moved_to_gold       = :moved_to_gold,
+            moved_to_complete   = :moved_to_complete,
 
             added_societes      = :added_societes,
             emails_completed    = :emails_completed,
             societe_completed   = :societe_completed,
 
-            total_deleted       = :total_deleted,
-            staging_vs_silver   = :staging_vs_silver,
-            staging_vs_gold     = :staging_vs_gold,
-            staging_vs_applique = :staging_vs_applique,
-            staging_internal    = :staging_internal,
+            total_deleted        = :total_deleted,
+            staging_vs_incomplete = :staging_vs_incomplete,
+            staging_vs_complete   = :staging_vs_complete,
+            staging_vs_applique   = :staging_vs_applique,
+            staging_internal      = :staging_internal,
 
             blacklisted_removed = :blacklisted_removed
 
@@ -1083,17 +1084,17 @@ def updatestat(db: Session, result: dict):
     """)
 
     db.execute(query, {
-        "moved_to_silver": result.get("moved_to_silver", 0),
+        "moved_to_incomplete": result.get("moved_to_incomplete", 0),
         "moved_to_clean":  result.get("moved_to_clean", 0),
-        "moved_to_gold":   result.get("moved_to_gold", 0),
+        "moved_to_complete":   result.get("moved_to_complete", 0),
 
         "added_societes": result.get("added_societes", 0),
         "emails_completed": result.get("emails_completed", 0),
         "societe_completed": result.get("societe_completed", 0),
 
         "total_deleted": result.get("total_deleted", 0),
-        "staging_vs_silver": result.get("staging_vs_silver", 0),
-        "staging_vs_gold": result.get("staging_vs_gold", 0),
+        "staging_vs_incomplete": result.get("staging_vs_incomplete", 0),
+        "staging_vs_complete": result.get("staging_vs_complete", 0),
         "staging_vs_applique": result.get("staging_vs_applique", 0),
         "staging_internal": result.get("staging_internal", 0),
 
