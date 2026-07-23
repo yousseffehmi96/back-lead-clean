@@ -1,0 +1,36 @@
+# Blueprint Render — déploie le backend FastAPI comme service web persistant.
+# Un process uvicorn qui tourne en continu : les threads d'arrière-plan du cron
+# (vérification email + promotion) survivent, contrairement au serverless Vercel.
+#
+# ⚠️ Renseigner les valeurs des variables ci-dessous dans le dashboard Render
+# (elles sont en sync:false = secrètes, non versionnées).
+#
+# Pour une vérification email longue (nombreux leads), préférer un plan
+# "starter" (always-on) : le plan "free" met le service en veille après 15 min
+# d'inactivité, ce qui peut interrompre un job de vérification en cours.
+services:
+  - type: web
+    name: back-lead-clean
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        sync: false
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASSWORD
+        sync: false
+      - key: IMAP_HOST
+        sync: false
+      - key: SMTP_HELO_DOMAIN
+        sync: false
+      - key: REQUIRE_AUTH
+        sync: false
+      - key: CLERK_ISSUER
+        sync: false
