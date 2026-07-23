@@ -268,7 +268,7 @@ FIELD_TO_COLUMN = {
     "societe": "societe",
     "fonction": "fonction",
     "telephone": "telephone",
-    "localisation": "location",
+    "location": "location",
     "linkedin": "linkedin",
 }
 
