@@ -6,6 +6,7 @@ from api.apiToken import Route as Token_router
 from model.staging_import_history import StagingImportHistory
 from model.steaging_applique import SteagingApplique
 from model.leads import Leads
+from model.export_leads import ExportLeads
 from fastapi.middleware.cors import CORSMiddleware
 from database.db import engine, Base
 from api.apiValidationRules import routes as validation_rules_router
@@ -13,6 +14,7 @@ from service.serviceLeads import Rephrase, run_auto_verify_cron
 from sqlalchemy import text
 from apscheduler.schedulers.background import BackgroundScheduler
 from contextlib import asynccontextmanager
+from datetime import datetime
 import os
 
 # ---------------------------------------------------------------------------
@@ -28,11 +30,12 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(
         run_auto_verify_cron,
         "interval",
-        minutes=int(os.getenv("AUTO_VERIFY_INTERVAL_MINUTES", "15")),
+        minutes=int(os.getenv("AUTO_VERIFY_INTERVAL_MINUTES", "1")),
         id="auto_verify",
-        max_instances=1,   # jamais deux exécutions en parallèle
-        coalesce=True,     # exécutions manquées -> une seule rejouée
+        max_instances=1,               # jamais deux exécutions en parallèle
+        coalesce=True,                 # exécutions manquées -> une seule rejouée
         replace_existing=True,
+        next_run_time=datetime.now(),  # 1er passage TOUT DE SUITE au démarrage
     )
     scheduler.start()
     print("[cron] planificateur démarré")

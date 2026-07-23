@@ -9,6 +9,7 @@ from model.statistiqueLeads import StatisticLeads
 from model.staging_leads import StagingLeads
 from model.staging_import_history import StagingImportHistory
 from model.steaging_applique import SteagingApplique
+from model.export_leads import ExportLeads
 from sqlalchemy import or_,and_
 from sqlalchemy import text
 from datetime import datetime
@@ -1060,6 +1061,118 @@ def StagingToClean(db: Session):
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Erreur inattendue : {str(e)}")
 
+def SnapshotToExportLeads(db: Session, base: str, filename: str | None = None,
+                          userid: str | None = None):
+    """Copie le résultat nettoyé de l'import dans `export_leads`.
+
+    À appeler APRÈS le nettoyage/déduplication et AVANT
+    StagingToSteagingApplique, qui vide `{base}`. On fige ainsi ce qui a
+    réellement été livré pour cet import, indépendamment de l'évolution
+    ultérieure des leads dans le pipeline.
+    """
+    try:
+        result = db.execute(text(f"""
+            INSERT INTO export_leads
+                (nom, prenom, email, fonction, societe, telephone, linkedin, location, filename, iduser)
+            SELECT nom, prenom, email, fonction, societe, telephone, linkedin, location,
+                   :filename, :userid
+            FROM {base}
+        """), {"filename": filename or "", "userid": str(userid or "")})
+        db.commit()
+        exported = result.rowcount or 0
+        print(f"✅ {exported} lignes copiées dans export_leads")
+        return {"exported_rows": exported}
+    except SQLAlchemyError as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Erreur export_leads : {str(e)}")
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Erreur inattendue export_leads : {str(e)}")
+
+
+def DownloadExportLeadsXlsx(db: Session, filename: str | None = None,
+                            userid: str | None = None):
+    """Génère le fichier Excel du contenu de `export_leads`.
+
+    Sans `filename`, on renvoie le dernier lot importé par cet utilisateur
+    (et non toute la table, qui accumule les imports successifs).
+    """
+    try:
+        q = db.query(ExportLeads)
+        if userid:
+            q = q.filter(ExportLeads.iduser == str(userid))
+        if filename:
+            q = q.filter(ExportLeads.filename == filename)
+        else:
+            # Dernier import de cet utilisateur
+            dernier = (
+                db.query(ExportLeads.filename)
+                .filter(ExportLeads.iduser == str(userid or ""))
+                .order_by(ExportLeads.id.desc())
+                .first()
+            )
+            if dernier and dernier[0]:
+                q = q.filter(ExportLeads.filename == dernier[0])
+
+        leads = q.order_by(ExportLeads.id).all()
+        if not leads:
+            raise HTTPException(status_code=404, detail="Aucun lead à exporter")
+
+        wb = Workbook()
+        sheet = wb.active
+        sheet.title = "Export Leads"
+
+        headers = ["Nom", "Prénom", "Email", "Fonction", "Société", "Téléphone", "LinkedIn", "Location"]
+        sheet.append(headers)
+
+        header_font = Font(bold=True, color="FFFFFF", size=12)
+        header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+        header_alignment = Alignment(horizontal="center", vertical="center")
+        for col_num, _ in enumerate(headers, 1):
+            cell = sheet.cell(row=1, column=col_num)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = header_alignment
+
+        for lead in leads:
+            sheet.append([
+                lead.nom, lead.prenom, lead.email, lead.fonction,
+                lead.societe, lead.telephone, lead.linkedin, lead.location,
+            ])
+
+        for col_num, header in enumerate(headers, 1):
+            column_letter = get_column_letter(col_num)
+            max_length = len(header)
+            for row in sheet.iter_rows(min_row=2, max_row=sheet.max_row, min_col=col_num, max_col=col_num):
+                for cell in row:
+                    if cell.value:
+                        max_length = max(max_length, len(str(cell.value)))
+            sheet.column_dimensions[column_letter].width = min(max_length + 2, 50)
+
+        thin_border = Border(left=Side(style='thin'), right=Side(style='thin'),
+                             top=Side(style='thin'), bottom=Side(style='thin'))
+        for row in sheet.iter_rows(min_row=1, max_row=sheet.max_row, min_col=1, max_col=len(headers)):
+            for cell in row:
+                cell.border = thin_border
+                if cell.row > 1:
+                    cell.alignment = Alignment(vertical="center")
+
+        buffer = io.BytesIO()
+        wb.save(buffer)
+        buffer.seek(0)
+
+        nom_fichier = (filename or "export-leads").rsplit(".", 1)[0]
+        return StreamingResponse(
+            buffer,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f'attachment; filename="{nom_fichier}-nettoye.xlsx"'},
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erreur export Excel : {str(e)}")
+
+
 def StagingToSteagingApplique(db: Session, base: str):
     try:
         result = db.execute(text(f"""
@@ -1906,7 +2019,7 @@ def send_email(to_email: str, message_id: str) -> bool:
     return True
 
 
-def check_bounce(message_id: str, to_email: str, limite: int = 10) -> dict | None:
+def check_bounce(message_id: str, to_email: str, limite: int = 60) -> dict | None:
     """Cherche un retour mailer-daemon correspondant à cet envoi.
 
     `limite` = nombre de derniers bounces inspectés. Pour un lot d'envois, il
@@ -1993,14 +2106,23 @@ def send_and_check(to_email: str, db: Session = None, attente: int = 20) -> dict
         else:
             res = {"email": addr, "code": 250, "status": f"✅ aucun rejet en {attente}s"}
 
-    is_valid = int(res.get("code", 0) or 0) == 250
-    statu = "disponible" if is_valid else "non disponible"
-    if db:
+    code = int(res.get("code", 0) or 0)
+    # 450 = INDÉTERMINÉ (quota SMTP dépassé, réseau, IMAP illisible) : on ne
+    # conclut RIEN et on laisse le statut inchangé (NULL) pour pouvoir réessayer.
+    # L'écrire "non disponible" produisait des faux négatifs en masse : des
+    # adresses valides étaient condamnées alors qu'aucun bounce n'était arrivé.
+    statu = None
+    if code == 250:
+        statu = "disponible"
+    elif code == 550:
+        statu = "non disponible"
+    if db and statu:
         _apply_statu(db, addr, statu)
     return {
         "email":  addr,
         "status": res.get("status", ""),
-        "code":   res.get("code", 0),
+        "code":   code,
+        "statu":  statu,          # None => indéterminé, à revérifier
         "raison": res.get("status", ""),
     }
 
@@ -2046,8 +2168,10 @@ def send_and_check_bulk(emails: list, db: Session = None, attente: int = 20) -> 
                 if bounce
                 else {"code": 250, "status": f"✅ aucun rejet en {attente}s"}
             )
-        statu = "disponible" if int(verdict.get("code", 0) or 0) == 250 else "non disponible"
-        if db:
+        # 450 = indéterminé -> aucun statut écrit (voir send_and_check)
+        code_v = int(verdict.get("code", 0) or 0)
+        statu = "disponible" if code_v == 250 else ("non disponible" if code_v == 550 else None)
+        if db and statu:
             _apply_statu(db, addr, statu)
         resultats.append({
             "email":  addr,
@@ -2063,7 +2187,7 @@ def send_and_check_bulk(emails: list, db: Session = None, attente: int = 20) -> 
 # ---------------------------------------------------------------------------
 VERIFY_JOBS: dict = {}
 _JOBS_LOCK = threading.Lock()
-_VERIFY_WORKERS = 100
+_VERIFY_WORKERS = 5
 # Envoi RÉEL : chaque worker ouvre sa propre connexion SMTP + attend un bounce
 # individuellement. Nombre limité pour ne pas cumuler trop d'envois simultanés
 # (contrairement à la sonde SMTP silencieuse, qui elle ne fait aucun envoi).
@@ -2107,7 +2231,11 @@ def _verify_and_promote_real(lead_id: int, company_map: dict) -> tuple:
             return (lead_id, "non disponible", False)
 
         res = send_and_check(cible, db)  # envoi réel + attente bounce ; met aussi statu à jour
-        statu = "disponible" if int(res.get("code", 0) or 0) == 250 else "non disponible"
+        # None => indéterminé (quota SMTP, réseau, IMAP) : le lead reste sans
+        # statut et sera revérifié, au lieu d'être condamné à tort.
+        statu = res.get("statu")
+        if statu is None:
+            return (lead_id, "indetermine", False)
 
         promoted = False
         if statu == "disponible":
@@ -2432,7 +2560,12 @@ def _verify_one_applique(db: Session, lead, company_map: dict, envoyer_test: boo
     if envoyer_test:
         res = send_and_check(cible, db)   # envoi réel + bounce ; met aussi statu à jour
         code = int(res.get("code", 0) or 0)
-        statu = "disponible" if code == 250 else "non disponible"
+        # 450 = indéterminé : on ne condamne pas l'adresse, le statut reste inchangé
+        statu = res.get("statu")
+        if statu is None:
+            return {"id": lead.id, "email": cible, "statu": None, "code": code,
+                    "regenerated": regenere, "conforme": conforme,
+                    "message": res.get("status", "Vérification non concluante, à réessayer")}
     else:
         code = int(smtp_probe(cible).get("code", 0) or 0)
         # 450 = catch-all / greylist : non concluant, on ne condamne pas l'adresse

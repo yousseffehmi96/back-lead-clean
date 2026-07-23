@@ -148,6 +148,10 @@ async def StagingDispatch(base:str,payload = Body(...), db: Session = Depends(ge
         if base == "import_leads":
             # Contacts trop incomplets (email+société vides, ou >=3 champs vides) -> Clean
             result.update(SP.MoveIncompleteToClean(db, base))
+            # Instantané du résultat nettoyé dans export_leads AVANT que
+            # StagingToSteagingApplique ne vide {base} : c'est ce lot qui sera
+            # proposé au téléchargement Excel.
+            result.update(SP.SnapshotToExportLeads(db, base, filename, userid))
             # Le reste -> Staging (ex-applique)
             r9 = SP.StagingToSteagingApplique(db, base)
             result.update(r9)
@@ -184,6 +188,14 @@ async def StagingDispatch(base:str,payload = Body(...), db: Session = Depends(ge
         import traceback
         print("ERREUR COMPLETE:", traceback.format_exc())
         raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/export-leads/download-xlsx")
+def download_export_leads_xlsx(filename: str | None = None, userid: str | None = None,
+                               db: Session = Depends(get_db)):
+    """Télécharge en Excel le résultat nettoyé d'un import (table export_leads).
+    Sans `filename`, renvoie le dernier import de l'utilisateur."""
+    return SP.DownloadExportLeadsXlsx(db, filename=filename, userid=userid)
+
 
 @router.get("/tocomplete/{id}")
 async def checkleadcomplete(id:int,db:Session=Depends(get_db)):
