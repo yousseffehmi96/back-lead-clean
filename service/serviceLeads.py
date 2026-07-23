@@ -150,20 +150,22 @@ def SteagingAppliqueToOptimized(db: Session, ids: list[int], pattern: str | None
                     details.append({"id": l.id, "reason": "email_non_disponible"})
                     continue
 
-                soc_key = _norm_company_key(l.societe)
-                if not soc_key or soc_key not in company_map:
-                    skipped += 1
-                    details.append({"id": l.id, "reason": "societe_not_found"})
-                    continue
-
-                patt = company_map[soc_key]
-                if not patt:
-                    skipped += 1
-                    details.append({"id": l.id, "reason": "societe_pattern_missing"})
-                    continue
-
+                # L'email existant suffit : la société ne sert qu'à GÉNÉRER un
+                # email manquant. Un lead "disponible" avec un email valide doit
+                # donc passer, même si sa société n'est pas dans societe_leads.
                 email = (l.email or "").strip()
                 if not email or email.lower() in ("nan", "none", "null"):
+                    # Email manquant -> on a besoin du patterne société pour le générer
+                    soc_key = _norm_company_key(l.societe)
+                    if not soc_key or soc_key not in company_map:
+                        skipped += 1
+                        details.append({"id": l.id, "reason": "societe_not_found"})
+                        continue
+                    patt = company_map[soc_key]
+                    if not patt:
+                        skipped += 1
+                        details.append({"id": l.id, "reason": "societe_pattern_missing"})
+                        continue
                     prenom = _norm_name_part(l.prenom)
                     nom = _norm_name_part(l.nom)
                     if not prenom or not nom:
@@ -188,6 +190,16 @@ def SteagingAppliqueToOptimized(db: Session, ids: list[int], pattern: str | None
                     _delete_duplicates_for(l.id, email, l.nom, l.prenom, l.societe)
                     details.append({"id": l.id, "reason": "deleted_already_in_optimized"})
                     continue
+
+                # Enregistre la société dans societe_leads (patterne + regex
+                # dérivés de l'email promu) si elle n'existe pas encore, ou
+                # ajoute ce format s'il est nouveau. Rend les prochains leads de
+                # la même société reconnaissables/générables automatiquement.
+                if l.societe:
+                    try:
+                        _autoadd_societe_from_email(db, l.societe, email, l.prenom, l.nom)
+                    except Exception:
+                        db.rollback()
 
                 obj = Leads(
                     email=email,
