@@ -34,3 +34,10 @@ services:
         sync: false
       - key: CLERK_ISSUER
         sync: false
+      # Cron de vérification automatique (voir lifespan dans main.py).
+      # ⚠️ Nécessite un plan "starter" (always-on) : sur le plan "free" le service
+      # s'endort après 15 min d'inactivité et le cron ne se déclenche plus.
+      - key: AUTO_VERIFY_INTERVAL_MINUTES
+        value: "15"
+      - key: CRON_TIMEZONE
+        value: Africa/Tunis

@@ -16,3 +16,4 @@ tzdata==2025.3
 dnspython
 PyJWT==2.12.1
 cryptography==46.0.7
+apscheduler==3.11.0

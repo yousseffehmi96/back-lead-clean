@@ -2134,7 +2134,7 @@ def _verify_and_promote_real(lead_id: int, company_map: dict) -> tuple:
         db.close()
 
 
-def _run_verify_job(job_id: str, ids: list, auto_promote: bool = False, envoyer_test: bool = False):
+def _run_verify_job(job_id: str, ids: list, auto_promote: bool = False, envoyer_test: bool = True):
     disponible_ids: list = []
     any_promoted = False
     try:
@@ -2227,7 +2227,7 @@ def _run_verify_job(job_id: str, ids: list, auto_promote: bool = False, envoyer_
                     VERIFY_JOBS[job_id]["moved_to_leads"] = int(promoted.get("moved_to_optimized", 0) or 0)
 
 
-def start_verify_job(ids: list, auto_promote: bool = False, envoyer_test: bool = False) -> dict:
+def start_verify_job(ids: list, auto_promote: bool = False, envoyer_test: bool = True) -> dict:
     ids = [int(i) for i in (ids or []) if str(i).strip() != ""]
     job_id = uuid.uuid4().hex
     with _JOBS_LOCK:
@@ -2255,6 +2255,30 @@ def trigger_auto_verify_unverified_staging(db: Session) -> dict:
     rows = db.execute(text("SELECT id FROM staging_leads WHERE statu IS NULL")).fetchall()
     ids = [int(r[0]) for r in rows]
     return start_verify_job(ids, auto_promote=True, envoyer_test=True)
+
+
+def run_auto_verify_cron() -> dict:
+    """
+    Tâche planifiée (cron) : vérifie automatiquement les leads staging sans statut.
+    Réutilise trigger_auto_verify_unverified_staging avec sa propre session.
+    Ne relance rien si une vérification tourne déjà (évite d'empiler les jobs,
+    un lot de plusieurs milliers d'emails pouvant durer plusieurs minutes).
+    """
+    with _JOBS_LOCK:
+        if any(j.get("status") == "running" for j in VERIFY_JOBS.values()):
+            print("[cron] vérification déjà en cours -> on passe ce tour")
+            return {"skipped": "job_deja_en_cours"}
+
+    db = SessionLocal()
+    try:
+        res = trigger_auto_verify_unverified_staging(db)
+        print(f"[cron] vérification lancée : {res}")
+        return res
+    except Exception as e:
+        print(f"[cron] erreur : {e}")
+        return {"error": str(e)}
+    finally:
+        db.close()
 
 
 def get_verify_job(job_id: str) -> dict:
@@ -2383,7 +2407,7 @@ def _resolve_target_email(db: Session, lead, company_map: dict) -> tuple:
     return cible, conforme, regenere
 
 
-def _verify_one_applique(db: Session, lead, company_map: dict, envoyer_test: bool = False) -> dict:
+def _verify_one_applique(db: Session, lead, company_map: dict, envoyer_test: bool = True) -> dict:
     """
     Flux de vérification :
     1) On confronte l'email du lead au patterne de sa société (via la regex stockée) :
