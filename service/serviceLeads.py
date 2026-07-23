@@ -2505,8 +2505,10 @@ def _resolve_target_email(db: Session, lead, company_map: dict) -> tuple:
     réseau ici.
 
     Retourne (cible, conforme, regenere). cible == "" si aucune adresse
-    exploitable n'a pu être déterminée — dans ce cas le lead est déjà marqué
-    "non disponible" et le commit déjà fait.
+    exploitable n'a pu être déterminée. Dans ce cas :
+      - email d'origine MANQUANT -> statu laissé à NULL (retenté plus tard,
+        quand la société sera connue et l'email générable) ;
+      - email d'origine PRÉSENT mais cassé -> statu "non disponible" (définitif).
     """
     email = (lead.email or "").strip().lower()
     nom_soc = (lead.societe or "").strip()
@@ -2538,6 +2540,15 @@ def _resolve_target_email(db: Session, lead, company_map: dict) -> tuple:
                 break
 
     if not cible or "@" not in cible:
+        email_absent = (not email) or email in ("nan", "none", "null")
+        if email_absent:
+            # Email MANQUANT et pas encore générable (société inconnue ou sans
+            # patterne) : on LAISSE statu = NULL au lieu de condamner le lead.
+            # Le cron le reprendra (il ne traite que statu IS NULL) une fois la
+            # société enregistrée -> l'email deviendra générable au tour suivant.
+            return "", conforme, regenere
+        # Email PRÉSENT mais inexploitable (format cassé, aucune génération
+        # possible) : ça ne s'auto-corrigera pas -> verdict définitif.
         lead.statu = "non disponible"
         db.commit()
         return "", conforme, regenere
