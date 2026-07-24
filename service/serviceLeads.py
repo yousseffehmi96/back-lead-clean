@@ -1825,27 +1825,70 @@ def _find_region_ville(location: str) -> tuple[str, str]:
     return "", ""
 
 
+def _norm_loc(s: str) -> str:
+    """Normalise pour comparaison : minuscules, sans tirets/espaces/apostrophes/virgules."""
+    s = str(s or "").lower()
+    for ch in ("-", " ", "'", "’", ","):
+        s = s.replace(ch, "")
+    return s
+
+
+# Nom de région normalisé -> nom canonique (avec tirets). Ex: "iledefrance" -> "Ile-de-France".
+_REGION_BY_NORM = {_norm_loc(r): r for r in regions_villes.keys()}
+
+
 def _reformuler_location(location) -> str | None:
     """
     Reformule une valeur de location au format "Ville, Région, France".
     Retourne la nouvelle valeur si elle diffère de l'actuelle, sinon None
     (rien à changer). Ne touche pas à la base — appelant responsable du commit.
+
+    IDEMPOTENTE et sûre :
+    - "Paris, Ile-de-France, France" (ville connue) -> gardé tel quel.
+    - "Ile-de-France" / "Ile, de, France" / "Ile de France" (région seule) ->
+      "Ile-de-France" (nom canonique avec tirets, JAMAIS "Ile, de, France").
+    - On ne découpe plus aveuglément 3 mots en "A, B, C" (bug qui cassait les
+      noms de régions et accumulait des virgules à chaque passage).
     """
     if not location or str(location).lower() in ("", "nan", "none"):
         return None
 
-    region, ville = _find_region_ville(location)
+    raw = str(location)
 
+    region, ville = _find_region_ville(raw)
     if region and ville:
         new_location = f"{ville}, {region}, France"
-    else:
-        parts = location.strip().split()
-        if len(parts) == 3:
-            new_location = f"{parts[0]}, {parts[1]}, {parts[2]}"
-        else:
-            return None
+        return new_location if new_location != raw else None
 
-    return new_location if new_location != location else None
+    # Pas de ville connue : est-ce une région connue (avec ou sans "France") ?
+    norm_full = _norm_loc(raw)
+    norm_no_country = norm_full[:-6] if norm_full.endswith("france") else norm_full
+    for cand in (norm_full, norm_no_country):
+        if cand in _REGION_BY_NORM:
+            canonical = _REGION_BY_NORM[cand]
+            return canonical if canonical != raw else None
+
+    # Tokens propres (virgules multiples/espaces retirés), sans le "France" final.
+    tokens = [t.strip() for t in raw.split(",") if t.strip()]
+    if tokens and tokens[-1].lower() == "france":
+        tokens = tokens[:-1]
+
+    # Cherche une région connue en SUFFIXE (les régions peuvent contenir des
+    # espaces : "Pays de la Loire", "Auvergne-Rhone-Alpes"...). On reconstruit
+    # alors "Ville, Région, France" avec le nom de région canonique.
+    words = " ".join(tokens).split()
+    for k in range(len(words), 0, -1):
+        cand_region = " ".join(words[-k:])
+        canonical = _REGION_BY_NORM.get(_norm_loc(cand_region))
+        if canonical:
+            ville_part = " ".join(words[:-k]).strip()
+            new_location = f"{ville_part}, {canonical}, France" if ville_part else f"{canonical}, France"
+            return new_location if new_location != raw else None
+
+    # Sinon : on se contente de nettoyer les virgules/espaces répétés,
+    # sans inventer de structure "A, B, C".
+    cleaned = ", ".join(tokens + ["France"]) if norm_full.endswith("france") else ", ".join(tokens)
+    return cleaned if cleaned and cleaned != raw else None
 
 
 def Rephrase(db: Session, base: str = "optimized"):
@@ -2042,7 +2085,7 @@ def check_bounce(message_id: str, to_email: str, limite: int = 60) -> dict | Non
     SMTP_USER     = os.getenv("SMTP_USER")
     SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
 
-    with imaplib.IMAP4_SSL(IMAP_HOST) as imap:
+    with imaplib.IMAP4_SSL(IMAP_HOST, timeout=15) as imap:
         imap.login(SMTP_USER, SMTP_PASSWORD)
         imap.select("INBOX")
 
@@ -2240,14 +2283,25 @@ def _verify_and_promote_real(lead_id: int, company_map: dict) -> tuple:
 
         cible, _conforme, _regenere = _resolve_target_email(db, lead, dict(company_map))
         if not cible:
+            try:
+                lead.statu = "non disponible"
+                db.commit()
+            except Exception:
+                db.rollback()
             return (lead_id, "non disponible", False)
 
-        res = send_and_check(cible, db)  # envoi réel + attente bounce ; met aussi statu à jour
-        # None => indéterminé (quota SMTP, réseau, IMAP) : le lead reste sans
-        # statut et sera revérifié, au lieu d'être condamné à tort.
-        statu = res.get("statu")
+        res = send_and_check(cible, db)  # envoi réel + attente bounce ; _apply_statu met staging_leads à jour
+        statu = res.get("statu")  # None => indéterminé (code 450, quota SMTP, IMAP illisible)
+
         if statu is None:
             return (lead_id, "indetermine", False)
+
+        # Forcer le statu sur ce lead précis (filet de sécurité si _apply_statu a raté)
+        try:
+            lead.statu = statu
+            db.commit()
+        except Exception:
+            db.rollback()
 
         promoted = False
         if statu == "disponible":
@@ -2391,8 +2445,11 @@ def trigger_auto_verify_unverified_staging(db: Session) -> dict:
     « Vérifier email », mais groupé sur tout le lot) à tous les emails de
     staging_leads sans statut (statu IS NULL), puis déplace automatiquement
     vers `optimized` ceux qui ressortent "disponible".
+
     """
-    rows = db.execute(text("SELECT id FROM staging_leads WHERE statu IS NULL")).fetchall()
+    rows = db.execute(
+        text("SELECT id FROM staging_leads WHERE statu IS NULL"),
+    ).fetchall()
     ids = [int(r[0]) for r in rows]
     return start_verify_job(ids, auto_promote=True, envoyer_test=True)
 
