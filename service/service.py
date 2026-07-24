@@ -190,6 +190,21 @@ def LoadFileToBd(file: UploadFile, db: Session, userid: Optional[str] = None, us
                         "message": "Tu as deja traite ce fichier"
                     }
 
+                # Check contre staging_leads (déjà nettoyé/appliqué) — avant toute insertion
+                q2 = text("""
+                    SELECT COUNT(DISTINCT LOWER(TRIM(COALESCE(email, ''))))
+                    FROM staging_leads
+                    WHERE LOWER(TRIM(COALESCE(email, ''))) = ANY(:emails)
+                """).bindparams(bindparam("emails", type_=ARRAY(Text)))
+                in_staging = db.execute(q2, {"emails": unique_emails}).scalar() or 0
+                if int(in_staging) >= max(1, int(0.95 * len(unique_emails))):
+                    return {
+                        "inserted_rows": 0,
+                        "duplicate_file_processed": True,
+                        "already_processed_in_applique": int(in_staging),
+                        "message": "Tu as deja traite ce fichier"
+                    }
+
         # 🚀 Insertion ultra-rapide
         engine = db.get_bind()
         df_clean.to_sql(
@@ -341,6 +356,21 @@ def LoadRowsToBd(rows, db: Session, userid: Optional[str] = None, username: Opti
                         "inserted_rows": 0,
                         "duplicate_file_processed": True,
                         "already_processed_in_history": existing,
+                        "message": "Tu as deja traite ce fichier"
+                    }
+
+                # Check contre staging_leads (déjà nettoyé/appliqué) — avant toute insertion
+                q2 = text("""
+                    SELECT COUNT(DISTINCT LOWER(TRIM(COALESCE(email, ''))))
+                    FROM staging_leads
+                    WHERE LOWER(TRIM(COALESCE(email, ''))) = ANY(:emails)
+                """).bindparams(bindparam("emails", type_=ARRAY(Text)))
+                in_staging = db.execute(q2, {"emails": unique_emails}).scalar() or 0
+                if int(in_staging) >= max(1, int(0.95 * len(unique_emails))):
+                    return {
+                        "inserted_rows": 0,
+                        "duplicate_file_processed": True,
+                        "already_processed_in_applique": int(in_staging),
                         "message": "Tu as deja traite ce fichier"
                     }
 
