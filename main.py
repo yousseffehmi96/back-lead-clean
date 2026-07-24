@@ -12,35 +12,39 @@ from database.db import engine, Base
 from api.apiValidationRules import routes as validation_rules_router
 from service.serviceLeads import Rephrase, run_auto_verify_cron
 from sqlalchemy import text
-from apscheduler.schedulers.background import BackgroundScheduler
 from contextlib import asynccontextmanager
-from datetime import datetime
+import asyncio
 import os
 
 # ---------------------------------------------------------------------------
 # Cron : vérifie automatiquement les leads staging sans statut, en continu.
 # Tourne tant que le process uvicorn est vivant (service web Render).
-# Intervalle réglable via AUTO_VERIFY_INTERVAL_MINUTES (défaut : 15 minutes).
+# Intervalle réglable via AUTO_VERIFY_INTERVAL_MINUTES (défaut : 1 minute).
+# Implémenté en asyncio pur (pas d'APScheduler) pour éviter les conflits
+# avec le mode --reload de uvicorn (threads daemon non fiables).
 # ---------------------------------------------------------------------------
-scheduler = BackgroundScheduler(timezone=os.getenv("CRON_TIMEZONE", "Africa/Tunis"))
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    scheduler.add_job(
-        run_auto_verify_cron,
-        "interval",
-        minutes=int(os.getenv("AUTO_VERIFY_INTERVAL_MINUTES", "1")),
-        id="auto_verify",
-        max_instances=1,               # jamais deux exécutions en parallèle
-        coalesce=True,                 # exécutions manquées -> une seule rejouée
-        replace_existing=True,
-        next_run_time=datetime.now(),  # 1er passage TOUT DE SUITE au démarrage
-    )
-    scheduler.start()
+    interval = int(os.getenv("AUTO_VERIFY_INTERVAL_MINUTES", "1")) * 60
+
+    async def _cron_loop():
+        loop = asyncio.get_event_loop()
+        while True:
+            try:
+                await loop.run_in_executor(None, run_auto_verify_cron)
+            except Exception as e:
+                print(f"[cron] erreur inattendue : {e}")
+            await asyncio.sleep(interval)
+
+    task = asyncio.create_task(_cron_loop())
     print("[cron] planificateur démarré")
     yield
-    scheduler.shutdown(wait=False)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
 
 
 app=FastAPI(lifespan=lifespan)

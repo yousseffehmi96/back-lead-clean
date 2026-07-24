@@ -12,6 +12,7 @@ print(DATABASE_URL)
 # keepalives : maintient la connexion SSL active côté TCP (Postgres managé / Supabase / Neon).
 engine = create_engine(
     DATABASE_URL,
+    pool_timeout=5,
     pool_pre_ping=True,
     pool_recycle=1800,
     pool_size=5,

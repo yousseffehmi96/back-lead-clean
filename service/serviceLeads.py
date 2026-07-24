@@ -2092,7 +2092,10 @@ def check_bounce(message_id: str, to_email: str, limite: int = 60) -> dict | Non
         _, data = imap.search(None, 'OR FROM "mailer-daemon" FROM "postmaster"')
         ids = data[0].split()
 
+        deadline = time.time() + 25  # max 25s pour scanner la boîte
         for mail_id in reversed(ids[-limite:]):
+            if time.time() > deadline:
+                break
             _, msg_data = imap.fetch(mail_id, "(RFC822)")
             raw = msg_data[0][1]
             msg = email.message_from_bytes(raw)
@@ -2274,42 +2277,60 @@ def _verify_and_promote_real(lead_id: int, company_map: dict) -> tuple:
     promu vers `optimized` immédiatement, sans attendre la fin des autres.
 
     Retourne (lead_id, statut, promoted: bool).
+
+    La connexion DB est FERMÉE avant l'envoi SMTP/IMAP pour ne pas saturer
+    le pool pendant l'attente du bounce (20+ secondes par lead).
     """
+    # --- Phase 1 : lecture seule — ouvrir, lire, FERMER avant le SMTP ---
     db = SessionLocal()
     try:
         lead = db.query(SteagingApplique).filter(SteagingApplique.id == lead_id).first()
         if not lead:
             return (lead_id, "introuvable", False)
-
         cible, _conforme, _regenere = _resolve_target_email(db, lead, dict(company_map))
-        if not cible:
-            try:
-                lead.statu = "non disponible"
-                db.commit()
-            except Exception:
-                db.rollback()
-            return (lead_id, "non disponible", False)
+        saved_location = lead.location
+    finally:
+        db.close()  # ← connexion rendue au pool AVANT le SMTP
 
-        res = send_and_check(cible, db)  # envoi réel + attente bounce ; _apply_statu met staging_leads à jour
-        statu = res.get("statu")  # None => indéterminé (code 450, quota SMTP, IMAP illisible)
-
-        if statu is None:
-            return (lead_id, "indetermine", False)
-
-        # Forcer le statu sur ce lead précis (filet de sécurité si _apply_statu a raté)
+    # --- Phase 2 : lead sans email → écrire "non disponible" et sortir ---
+    if not cible:
+        db = SessionLocal()
         try:
-            lead.statu = statu
+            lead2 = db.query(SteagingApplique).filter(SteagingApplique.id == lead_id).first()
+            if lead2:
+                lead2.statu = "non disponible"
+                db.commit()
+        except Exception:
+            db.rollback()
+        finally:
+            db.close()
+        return (lead_id, "non disponible", False)
+
+    # --- Phase 3 : SMTP + sleep + IMAP — AUCUNE connexion DB ouverte ---
+    res = send_and_check(cible, db=None)  # envoi réel + attente bounce
+    statu = res.get("statu")  # None => indéterminé (code 450, quota SMTP, IMAP illisible)
+    if statu is None:
+        return (lead_id, "indetermine", False)
+
+    # --- Phase 4 : écriture du statu + promotion ---
+    db = SessionLocal()
+    try:
+        lead3 = db.query(SteagingApplique).filter(SteagingApplique.id == lead_id).first()
+        if not lead3:
+            return (lead_id, statu, False)
+
+        try:
+            lead3.statu = statu
             db.commit()
         except Exception:
             db.rollback()
 
         promoted = False
         if statu == "disponible":
-            # Reformater location AVANT l'envoi vers optimized (pas après).
             try:
-                new_location = _reformuler_location(lead.location)
+                new_location = _reformuler_location(saved_location)
                 if new_location:
-                    lead.location = new_location
+                    lead3.location = new_location
                     db.commit()
             except Exception:
                 db.rollback()
@@ -2461,13 +2482,37 @@ def run_auto_verify_cron() -> dict:
     Ne relance rien si une vérification tourne déjà (évite d'empiler les jobs,
     un lot de plusieurs milliers d'emails pouvant durer plusieurs minutes).
     """
+    print("[cron] tick")
     with _JOBS_LOCK:
+        for k in [k for k, v in VERIFY_JOBS.items() if v.get("status") == "done"]:
+            del VERIFY_JOBS[k]
         if any(j.get("status") == "running" for j in VERIFY_JOBS.values()):
             print("[cron] vérification déjà en cours -> on passe ce tour")
             return {"skipped": "job_deja_en_cours"}
 
     db = SessionLocal()
     try:
+        # Rattrapage : leads "disponible" restés en staging (promotion manquée)
+        try:
+            db.execute(text("""
+                INSERT INTO optimized
+                    (email, nom, prenom, fonction, societe, telephone, linkedin, location, statu)
+                SELECT email, nom, prenom, fonction, societe, telephone, linkedin, location, statu
+                FROM staging_leads
+                WHERE statu = 'disponible'
+                  AND email IS NOT NULL AND TRIM(email) <> ''
+                ON CONFLICT (email) DO NOTHING
+            """))
+            res_del = db.execute(text("""
+                DELETE FROM staging_leads
+                WHERE statu = 'disponible'
+            """))
+            db.commit()
+            print(f"[cron] rattrapage disponible : {res_del.rowcount} supprimés de staging")
+        except Exception as e:
+            db.rollback()
+            print(f"[cron] rattrapage disponible erreur : {e}")
+
         res = trigger_auto_verify_unverified_staging(db)
         print(f"[cron] vérification lancée : {res}")
         return res
