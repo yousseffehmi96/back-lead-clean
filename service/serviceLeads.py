@@ -10,8 +10,9 @@ from model.staging_leads import StagingLeads
 from model.staging_import_history import StagingImportHistory
 from model.steaging_applique import SteagingApplique
 from model.export_leads import ExportLeads
-from sqlalchemy import or_,and_
+from sqlalchemy import or_, and_, bindparam, Text
 from sqlalchemy import text
+from sqlalchemy.dialects.postgresql import ARRAY
 from datetime import datetime
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -2074,6 +2075,41 @@ def send_email(to_email: str, message_id: str) -> bool:
     return True
 
 
+def _scan_late_bounces(emails: list) -> set:
+    """Ouvre une seule session IMAP et retourne l'ensemble des emails (lowercase)
+    pour lesquels un bounce mailer-daemon/postmaster a été reçu.
+    Utilisé juste avant la promotion pour attraper les bounces tardifs."""
+    bounced: set = set()
+    if not emails:
+        return bounced
+    targets = {str(e).strip().lower() for e in emails if e}
+    IMAP_HOST     = os.getenv("IMAP_HOST")
+    SMTP_USER     = os.getenv("SMTP_USER")
+    SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
+    try:
+        with imaplib.IMAP4_SSL(IMAP_HOST, timeout=15) as imap:
+            imap.login(SMTP_USER, SMTP_PASSWORD)
+            imap.select("INBOX")
+            _, data = imap.search(None, 'OR FROM "mailer-daemon" FROM "postmaster"')
+            ids = data[0].split()
+            deadline = time.time() + 30
+            for mail_id in reversed(ids[-50:]):
+                if time.time() > deadline:
+                    break
+                _, msg_data = imap.fetch(mail_id, "(RFC822)")
+                if not msg_data or not msg_data[0]:
+                    continue
+                raw = msg_data[0][1].decode(errors="ignore").lower()
+                for email in targets:
+                    if email in raw:
+                        bounced.add(email)
+                if bounced >= targets:
+                    break
+    except Exception as e:
+        print(f"[cron] scan_late_bounces erreur IMAP : {e}")
+    return bounced
+
+
 def check_bounce(message_id: str, to_email: str, limite: int = 60) -> dict | None:
     """Cherche un retour mailer-daemon correspondant à cet envoi.
 
@@ -2492,6 +2528,30 @@ def run_auto_verify_cron() -> dict:
 
     db = SessionLocal()
     try:
+        # Étape 2.5 — late bounce check : re-vérifier l'IMAP pour les leads
+        # marqués "disponible" avant de les promouvoir. Attrape les bounces
+        # tardifs (serveurs lents comme cgi.com qui répondent en 5-15 min).
+        try:
+            rows_dispo = db.execute(text(
+                "SELECT email FROM staging_leads WHERE statu = 'disponible' AND email IS NOT NULL AND TRIM(email) <> ''"
+            )).fetchall()
+            emails_dispo = [r[0] for r in rows_dispo]
+            if emails_dispo:
+                bounced = _scan_late_bounces(emails_dispo)
+                if bounced:
+                    db.execute(text("""
+                        UPDATE staging_leads
+                        SET statu = 'non disponible'
+                        WHERE statu = 'disponible'
+                          AND LOWER(TRIM(COALESCE(email, ''))) = ANY(:emails)
+                    """).bindparams(bindparam("emails", type_=ARRAY(Text))),
+                        {"emails": list(bounced)})
+                    db.commit()
+                    print(f"[cron] late bounce : {len(bounced)} reclassés non disponible : {bounced}")
+        except Exception as e:
+            db.rollback()
+            print(f"[cron] late bounce erreur : {e}")
+
         # Rattrapage : leads "disponible" restés en staging (promotion manquée)
         try:
             db.execute(text("""
