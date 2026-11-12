@@ -567,7 +567,7 @@ def GetAllStagingImportHistory(db: Session, userid: str | None = None):
     return enriched
 def DownloadProdLeadCSV(types:str,db: Session, ids: list[int] | None = None):
     try:
-        # 1️⃣ Charger les données
+        # 1⃣ Charger les données
         if ids:
             # Sélection explicite envoyée par le front (ex: les leads à 100%)
             leads = db.query(Leads).filter(Leads.id.in_(ids)).all()
@@ -582,11 +582,11 @@ def DownloadProdLeadCSV(types:str,db: Session, ids: list[int] | None = None):
         if not leads:
             raise HTTPException(status_code=404, detail="Aucun lead à télécharger")
 
-        # 2️⃣ Créer le buffer avec BOM UTF-8 (pour que Excel reconnaisse l'UTF-8)
+        # 2⃣ Créer le buffer avec BOM UTF-8 (pour que Excel reconnaisse l'UTF-8)
         output = io.StringIO()
         output.write('\ufeff')  # BOM pour UTF-8
         
-        # 3️⃣ Créer le writer CSV
+        # 3⃣ Créer le writer CSV
         writer = csv.writer(
             output, 
             delimiter=';',           # Point-virgule pour Excel français
@@ -594,7 +594,7 @@ def DownloadProdLeadCSV(types:str,db: Session, ids: list[int] | None = None):
             lineterminator='\n'
         )
         
-        # 4️⃣ En-têtes
+        # 4⃣ En-têtes
         writer.writerow([
             "Nom",
             "Prénom",
@@ -606,7 +606,7 @@ def DownloadProdLeadCSV(types:str,db: Session, ids: list[int] | None = None):
             "Location"
         ])
         
-        # 5️⃣ Données (gérer les None)
+        # 5⃣ Données (gérer les None)
         for lead in leads:
             writer.writerow([
                 lead.nom or "",
@@ -621,10 +621,10 @@ def DownloadProdLeadCSV(types:str,db: Session, ids: list[int] | None = None):
         
         output.seek(0)
         
-        # 6️⃣ Nom du fichier avec timestamp
+        # 6⃣ Nom du fichier avec timestamp
         filename = f"leads_optimized_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
         
-        # 7️⃣ Retourner le fichier
+        # 7⃣ Retourner le fichier
         return StreamingResponse(
             iter([output.getvalue()]),
             media_type="text/csv; charset=utf-8",
@@ -653,16 +653,16 @@ def DownloadLeadXlsx(types:str,db: Session, ids: list[int] | None = None):
         if not leads:
             raise HTTPException(status_code=404, detail="Aucun lead à télécharger")
 
-        # 2️⃣ Créer le workbook
+        # 2⃣ Créer le workbook
         wb = Workbook()
         sheet = wb.active
         sheet.title = "Leads Optimized"
         
-        # 3️⃣ En-têtes
+        # 3⃣ En-têtes
         headers = ["Nom", "Prénom", "Email", "Fonction", "Société", "Téléphone", "LinkedIn", "Location"]
         sheet.append(headers)
         
-        # 4️⃣ Style des en-têtes
+        # 4⃣ Style des en-têtes
         header_font = Font(bold=True, color="FFFFFF", size=12)
         header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
         header_alignment = Alignment(horizontal="center", vertical="center")
@@ -673,7 +673,7 @@ def DownloadLeadXlsx(types:str,db: Session, ids: list[int] | None = None):
             cell.fill = header_fill
             cell.alignment = header_alignment
         
-        # 5️⃣ Ajouter les données
+        # 5⃣ Ajouter les données
         for lead in leads:
             sheet.append([
                 lead.nom,
@@ -686,7 +686,7 @@ def DownloadLeadXlsx(types:str,db: Session, ids: list[int] | None = None):
                 lead.location
             ])
         
-        # 6️⃣ Auto-ajuster la largeur des colonnes
+        # 6⃣ Auto-ajuster la largeur des colonnes
         for col_num, header in enumerate(headers, 1):
             column_letter = get_column_letter(col_num)
             max_length = len(header)
@@ -700,7 +700,7 @@ def DownloadLeadXlsx(types:str,db: Session, ids: list[int] | None = None):
             adjusted_width = min(max_length + 2, 50)
             sheet.column_dimensions[column_letter].width = adjusted_width
         
-        # 7️⃣ Bordures pour toutes les cellules
+        # 7⃣ Bordures pour toutes les cellules
         thin_border = Border(
             left=Side(style='thin'),
             right=Side(style='thin'),
@@ -714,15 +714,15 @@ def DownloadLeadXlsx(types:str,db: Session, ids: list[int] | None = None):
                 if cell.row > 1:  # Données (pas en-têtes)
                     cell.alignment = Alignment(vertical="center")
         
-        # 8️⃣ Figer la première ligne
+        # 8⃣ Figer la première ligne
         sheet.freeze_panes = "A2"
         
-        # 9️⃣ Sauvegarder dans un buffer
+        # 9⃣ Sauvegarder dans un buffer
         output = io.BytesIO()
         wb.save(output)
         output.seek(0)
         
-        # 🔟 Retourner le fichier
+        # Retourner le fichier
         filename = f"leads_optimized_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
         
         return StreamingResponse(
@@ -910,7 +910,7 @@ def ToBlack(id:int,eliminer:str,db:Session):
     
 def StagingToIncomplete(db: Session,base:str):
     try:
-        # 1️⃣ INSERT INTO optimized depuis staging (évite les doublons)
+        # 1⃣ INSERT INTO optimized depuis staging (évite les doublons)
         result = db.execute(text(f"""
             INSERT INTO optimized (nom, prenom, email, fonction, societe, telephone, linkedin, location)
             SELECT DISTINCT ON (email)
@@ -941,7 +941,7 @@ def StagingToIncomplete(db: Session,base:str):
         
         moved_count = result.rowcount
         
-        # 2️⃣ DELETE depuis staging (ceux qui ont été déplacés + doublons internes)
+        # 2⃣ DELETE depuis staging (ceux qui ont été déplacés + doublons internes)
         db.execute(text(f"""
             DELETE FROM {base}
             WHERE email IS NOT NULL 
@@ -965,7 +965,7 @@ def StagingToIncomplete(db: Session,base:str):
         
         db.commit()
         
-        print(f"✅ {moved_count} leads déplacés vers Optimized (incomplete)")
+        print(f"{moved_count} leads déplacés vers Optimized (incomplete)")
         return {"moved_to_incomplete": moved_count}
 
     except SQLAlchemyError as e:
@@ -1012,7 +1012,7 @@ def MoveIncompleteToClean(db: Session, base: str = "import_leads"):
         moved = result.rowcount or 0
         db.execute(text(f"DELETE FROM {base} WHERE {_cond('')}"))
         db.commit()
-        print(f"✅ {moved} contacts incomplets -> Clean")
+        print(f"{moved} contacts incomplets -> Clean")
         return {"moved_to_clean": int(moved)}
     except SQLAlchemyError as e:
         db.rollback()
@@ -1024,7 +1024,7 @@ def MoveIncompleteToClean(db: Session, base: str = "import_leads"):
 
 def StagingToClean(db: Session):
     try:
-        # 1️⃣ Inserer les leads dont nom ou prenom reste vide
+        # 1⃣ Inserer les leads dont nom ou prenom reste vide
         # (la complétion depuis email est déjà tentée avant cet appel)
         result = db.execute(text("""
             INSERT INTO cleaning_leads (nom, prenom, email, fonction, societe, telephone, linkedin, location)
@@ -1064,7 +1064,7 @@ def StagingToClean(db: Session):
         db.commit()
 
         
-        print(f"✅ {net_moved} leads déplacés vers Cleaning")
+        print(f"{net_moved} leads déplacés vers Cleaning")
         return {"moved_to_clean": net_moved}
 
     except SQLAlchemyError as e:
@@ -1093,7 +1093,7 @@ def SnapshotToExportLeads(db: Session, base: str, filename: str | None = None,
         """), {"filename": filename or "", "userid": str(userid or "")})
         db.commit()
         exported = result.rowcount or 0
-        print(f"✅ {exported} lignes copiées dans export_leads")
+        print(f"{exported} lignes copiées dans export_leads")
         return {"exported_rows": exported}
     except SQLAlchemyError as e:
         db.rollback()
@@ -1279,7 +1279,7 @@ def StagingToComplete(db: Session,base:str):
         
         db.commit()
         
-        print(f"✅ {moved_count} leads déplacés vers Optimized (complete)")
+        print(f"{moved_count} leads déplacés vers Optimized (complete)")
         return {"moved_to_complete": moved_count}
 
     except SQLAlchemyError as e:
@@ -1333,7 +1333,7 @@ def CompleteSocieteFromEmail(db: Session,base:str):
         db.commit()
         count = (result1.rowcount if hasattr(result1, "rowcount") else 0) + (result2.rowcount if hasattr(result2, "rowcount") else 0)
         
-        print(f"✅ {count} sociétés complétées depuis les emails")
+        print(f"{count} sociétés complétées depuis les emails")
         return {"societe_completed": count}
 
     except SQLAlchemyError as e:
@@ -1377,7 +1377,7 @@ def CompleteNomPrenomFromEmail(db: Session,base:str):
         db.commit()
         count = result.rowcount
         
-        print(f"✅ {count} noms/prénoms complétés depuis les emails")
+        print(f"{count} noms/prénoms complétés depuis les emails")
         return {"nom_prenom_completed": count}
 
     except SQLAlchemyError as e:
@@ -1910,7 +1910,7 @@ def Rephrase(db: Session, base: str = "optimized"):
 
         db.commit()
 
-        print(f"✅ {updated_count} locations reformulées")
+        print(f"{updated_count} locations reformulées")
         return {"reformulated": updated_count}
 
     except SQLAlchemyError as e:
@@ -1991,11 +1991,11 @@ def smtp_probe(email_addr: str, timeout: int = 8) -> dict:
     """
     addr = str(email_addr or "").strip().lower()
     if "@" not in addr:
-        return {"email": addr, "code": 550, "status": "❌ format invalide"}
+        return {"email": addr, "code": 550, "status": "format invalide"}
     domain = addr.split("@", 1)[1]
     hosts = _resolve_mx(domain)
     if not hosts:
-        return {"email": addr, "code": 450, "status": "⚠️ domaine sans MX"}
+        return {"email": addr, "code": 450, "status": "domaine sans MX"}
 
     sender = _sender_domain()
     for mx in hosts[:2]:   # essaie les 2 premiers MX
@@ -2005,13 +2005,13 @@ def smtp_probe(email_addr: str, timeout: int = 8) -> dict:
         if code in (250, 251):
             # Domaine accept-all ? -> on ne peut pas conclure "valide"
             if _is_catch_all(mx, sender, domain, timeout):
-                return {"email": addr, "code": 450, "status": "⚠️ domaine catch-all"}
-            return {"email": addr, "code": 250, "status": "✅ adresse acceptée"}
+                return {"email": addr, "code": 450, "status": "domaine catch-all"}
+            return {"email": addr, "code": 250, "status": "adresse acceptée"}
         if code in (550, 551, 553, 554):
-            return {"email": addr, "code": 550, "status": "❌ adresse rejetée"}
+            return {"email": addr, "code": 550, "status": "adresse rejetée"}
         if 400 <= code < 500:
-            return {"email": addr, "code": 450, "status": "⚠️ temporaire (greylist)"}
-    return {"email": addr, "code": 450, "status": "⚠️ MX injoignable"}
+            return {"email": addr, "code": 450, "status": "temporaire (greylist)"}
+    return {"email": addr, "code": 450, "status": "MX injoignable"}
 
 
 def _apply_statu(db: Session, to_email: str, statu: str):
@@ -2164,14 +2164,14 @@ def send_and_check(to_email: str, db: Session = None, attente: int = 20) -> dict
     550 -> destinataire refusé à l'envoi, ou bounce reçu
     450 -> indéterminé (erreur SMTP/IMAP)
 
-    ⚠️ L'absence de bounce dans la fenêtre d'attente NE PROUVE PAS que la boîte
+    L'absence de bounce dans la fenêtre d'attente NE PROUVE PAS que la boîte
     existe : un rejet peut arriver plusieurs heures après. Le verdict 250 est
     donc optimiste. La sonde smtp_probe() reste disponible pour un test
     immédiat et sans envoi.
     """
     addr = str(to_email or "").strip().lower()
     if "@" not in addr:
-        return {"email": addr, "status": "❌ format invalide", "code": 550, "raison": "❌ format invalide"}
+        return {"email": addr, "status": "format invalide", "code": 550, "raison": "format invalide"}
 
     message_id = make_msgid()
 
@@ -2179,9 +2179,9 @@ def send_and_check(to_email: str, db: Session = None, attente: int = 20) -> dict
     try:
         send_email(addr, message_id)
     except smtplib.SMTPRecipientsRefused:
-        res = {"email": addr, "code": 550, "status": "❌ destinataire refusé à l'envoi"}
+        res = {"email": addr, "code": 550, "status": "destinataire refusé à l'envoi"}
     except Exception as e:
-        res = {"email": addr, "code": 450, "status": f"⚠️ envoi impossible ({e})"}
+        res = {"email": addr, "code": 450, "status": f"envoi impossible ({e})"}
     else:
         # 2) Attente d'un bounce : on interroge la boîte toutes les 5 s.
         bounce = None
@@ -2191,14 +2191,14 @@ def send_and_check(to_email: str, db: Session = None, attente: int = 20) -> dict
             try:
                 bounce = check_bounce(message_id, addr)
             except Exception as e:
-                print(f"⚠️ Lecture IMAP impossible pour {addr} : {e}")
+                print(f"Lecture IMAP impossible pour {addr} : {e}")
                 break
             if bounce:
                 break
         if bounce:
-            res = {"email": addr, "code": 550, "status": f"❌ rejeté : {bounce.get('subject') or 'bounce reçu'}"}
+            res = {"email": addr, "code": 550, "status": f"rejeté : {bounce.get('subject') or 'bounce reçu'}"}
         else:
-            res = {"email": addr, "code": 250, "status": f"✅ aucun rejet en {attente}s"}
+            res = {"email": addr, "code": 250, "status": f"aucun rejet en {attente}s"}
 
     code = int(res.get("code", 0) or 0)
     # 450 = INDÉTERMINÉ (quota SMTP dépassé, réseau, IMAP illisible) : on ne
@@ -2233,16 +2233,16 @@ def send_and_check_bulk(emails: list, db: Session = None, attente: int = 20) -> 
     for brut in emails or []:
         addr = str(brut or "").strip().lower()
         if "@" not in addr:
-            envois.append((addr, None, {"code": 550, "status": "❌ format invalide"}))
+            envois.append((addr, None, {"code": 550, "status": "format invalide"}))
             continue
         message_id = make_msgid()
         try:
             send_email(addr, message_id)
             envois.append((addr, message_id, None))
         except smtplib.SMTPRecipientsRefused:
-            envois.append((addr, None, {"code": 550, "status": "❌ destinataire refusé à l'envoi"}))
+            envois.append((addr, None, {"code": 550, "status": "destinataire refusé à l'envoi"}))
         except Exception as e:
-            envois.append((addr, None, {"code": 450, "status": f"⚠️ envoi impossible ({e})"}))
+            envois.append((addr, None, {"code": 450, "status": f"envoi impossible ({e})"}))
 
     # Une seule fenêtre d'attente, commune à tout le lot
     if any(mid for _, mid, _ in envois):
@@ -2255,12 +2255,12 @@ def send_and_check_bulk(emails: list, db: Session = None, attente: int = 20) -> 
                 # Fenêtre de lecture élargie : un lot génère plusieurs bounces
                 bounce = check_bounce(message_id, addr, limite=max(10, 4 * len(envois)))
             except Exception as e:
-                print(f"⚠️ Lecture IMAP impossible pour {addr} : {e}")
+                print(f"Lecture IMAP impossible pour {addr} : {e}")
                 bounce = None
             verdict = (
-                {"code": 550, "status": f"❌ rejeté : {bounce.get('subject') or 'bounce reçu'}"}
+                {"code": 550, "status": f"rejeté : {bounce.get('subject') or 'bounce reçu'}"}
                 if bounce
-                else {"code": 250, "status": f"✅ aucun rejet en {attente}s"}
+                else {"code": 250, "status": f"aucun rejet en {attente}s"}
             )
         # 450 = indéterminé -> aucun statut écrit (voir send_and_check)
         code_v = int(verdict.get("code", 0) or 0)

@@ -2,6 +2,7 @@ from fastapi import Form,UploadFile,File,APIRouter,Depends,Body
 from service.service import *
 from database.db import get_db
 import service.serviceLeads as sp
+import service.serviceImportJob as SIJ
 Router=APIRouter()
 
 @Router.post("/upload")
@@ -15,7 +16,6 @@ async def Upload(userid: str = Form(...), username: str | None = Form(None), fil
     # si fichier déjà traité (détecté via historique), ne pas polluer staging/stat
     if stats.get("duplicate_file_processed"):
         return stats
-    print("stat lena",stats)
     nettoyer_contact(db)
     print("stat lena3",stats)
     stats.setdefault("emails_completed", 0)
@@ -27,8 +27,7 @@ async def Upload(userid: str = Form(...), username: str | None = Form(None), fil
     stats.setdefault("staging_vs_complete", 0)
     stats.setdefault("staging_internal", 0)
     static = Static(**stats) 
-    print("hethi static")
-    print("kikiki")
+   
     SaveStatic(db,static)
     # Check: fichier déjà traité (doublons vs staging_leads) dès l'import
     try:
@@ -44,48 +43,26 @@ async def Upload(userid: str = Form(...), username: str | None = Form(None), fil
 
 
 @Router.post("/upload-mapped")
-async def UploadMapped(payload=Body(...), db: Session = Depends(get_db)):
-    """Insère des lignes mappées (mapping manuel des colonnes) dans import_leads,
-    exactement comme /upload le fait pour un fichier.
+def UploadMapped(payload=Body(...), db: Session = Depends(get_db)):
+    """Insère des lignes mappées (mapping manuel des colonnes) dans import_leads.
 
     - Si `mapping` est fourni, les `rows` sont des lignes brutes (entêtes du fichier)
-      et le mapping {champ: entête} est appliqué ici, côté serveur.
-    - Sinon, les `rows` sont supposées déjà mappées (clés canoniques)."""
-    rows = payload.get("rows") or []
-    mapping = payload.get("mapping") or {}
-    if mapping:
-        rows = ApplyFieldMapping(rows, mapping)
-    userid = str(payload.get("userid") or "")
-    username = payload.get("username")
-    filename = payload.get("filename") or "import-mappe"
+      et le mapping {champ: entête} est appliqué côté serveur.
+    - Sinon, les `rows` sont supposées déjà mappées (clés canoniques).
 
-    stats = {}
-    stats["filename"] = filename
-    stats["iduser"] = userid
-    stats.update(LoadRowsToBd(rows, db, userid, username, filename))
-    if stats.get("duplicate_file_processed"):
-        return stats
-    nettoyer_contact(db)
-    stats.setdefault("emails_completed", 0)
-    stats.setdefault("blacklisted_removed", 0)
-    stats.setdefault("moved_to_incomplete", 0)
-    stats.setdefault("moved_to_complete", 0)
-    stats.setdefault("moved_to_clean", 0)
-    stats.setdefault("staging_vs_incomplete", 0)
-    stats.setdefault("staging_vs_complete", 0)
-    stats.setdefault("staging_internal", 0)
-    static = Static(**stats)
-    SaveStatic(db, static)
-    try:
-        inserted_rows = int(stats.get("inserted_rows", 0) or 0)
-        already_processed = sp.CountLastImportAlreadyProcessedInApplique(db, filename, userid, inserted_rows)
-        stats["already_processed_in_applique"] = already_processed
-        if inserted_rows > 0 and already_processed == inserted_rows:
-            stats["duplicate_file_processed"] = True
-            stats["message"] = "Tu as deja traite ce fichier"
-    except Exception:
-        pass
-    return stats
+    Conservé pour compatibilité : le front passe désormais par /import/start,
+    qui exécute ce même pipeline en tâche de fond avec progression.
+    `def` et non `async def` : le corps est du SQL synchrone, FastAPI l'exécute
+    donc dans son threadpool au lieu de bloquer la boucle d'événements.
+    """
+    return SIJ.run_upload_pipeline(
+        db,
+        payload.get("rows") or [],
+        payload.get("mapping") or {},
+        str(payload.get("userid") or ""),
+        payload.get("username"),
+        payload.get("filename") or "import-mappe",
+    )
 
 
 

@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 import service.serviceLeads as SP
 from database.db import get_db
 from service.service import *
+import service.serviceImportJob as SIJ
 import service.serviceSociete as Ss
 router=APIRouter()
 @router.get("/optimized")
@@ -92,7 +93,14 @@ async def export_database_zip(is_manager: bool = False, db: Session = Depends(ge
         return SP.ExportDatabaseZip(db, is_manager=is_manager)
 
 @router.post("/staging-dispatch/{base}")
-async def StagingDispatch(base:str,payload = Body(...), db: Session = Depends(get_db)):
+def StagingDispatch(base:str,payload = Body(...), db: Session = Depends(get_db)):
+    """Nettoyage, complétion, déduplication puis répartition vers staging_leads.
+
+    Le corps vit dans service/serviceImportJob.run_dispatch_pipeline : le worker
+    d'import en tâche de fond exécute exactement la même séquence, en y
+    branchant en plus la progression. `def` et non `async def` : SQL synchrone,
+    donc exécuté dans le threadpool de FastAPI et non sur la boucle d'événements.
+    """
     try:
         filename = ""
         userid = ""
@@ -106,83 +114,14 @@ async def StagingDispatch(base:str,payload = Body(...), db: Session = Depends(ge
         else:
             filename = str(payload or "")
 
-        result = {}
-        # Nettoyage des caractères spéciaux (noms, société, téléphone, email…) avant tout traitement
-        result.update(CleanSpecialChars(db, base))
-
-        r2 = CompleteEmail(db,base, pattern=email_pattern)
-        result.update(r2)
-        
-        r4 = SP.CompleteSocieteFromEmail(db,base)
-        result.update(r4)
-
-        # Complétion nom/prénom depuis l'email -> DÉSACTIVÉE (valeurs devinées peu fiables)
-        # r5 = SP.CompleteNomPrenomFromEmail(db,base)
-        # result.update(r5)
-
-        #r_soc = Ss.AddAuto(db, base)
-        #result.update(r_soc)
-
-        result.update(SupprimerDoublons(db))
-        
-        r3 = CheckContactsBlack(db,base)
-        result.update(r3)
-
-        # Total supprimé = doublons (incomplete/complete/applique/interne) + blacklistés retirés
-        try:
-            result["total_deleted"] = (
-                int(result.get("staging_vs_incomplete", 0) or 0)
-                + int(result.get("staging_vs_complete", 0) or 0)
-                + int(result.get("staging_vs_applique", 0) or 0)
-                + int(result.get("staging_internal", 0) or 0)
-                + int(result.get("blacklisted_removed", 0) or 0)
-            )
-        except Exception:
-            pass
-
-        db.expire_all()
-
-        # Tri Complete/Incomplete/Clean désactivé pour le moment : on ramène TOUS les leads
-        # (après nettoyage/complétion/déduplication) vers staging_leads.
-        # StagingToSteagingApplique insère tout depuis {base} puis vide {base}.
-        if base == "import_leads":
-            # Contacts trop incomplets (email+société vides, ou >=3 champs vides) -> Clean
-            result.update(SP.MoveIncompleteToClean(db, base))
-            # Instantané du résultat nettoyé dans export_leads AVANT que
-            # StagingToSteagingApplique ne vide {base} : c'est ce lot qui sera
-            # proposé au téléchargement Excel.
-            result.update(SP.SnapshotToExportLeads(db, base, filename, userid))
-            # Le reste -> Staging (ex-applique)
-            r9 = SP.StagingToSteagingApplique(db, base)
-            result.update(r9)
-
-            # Des leads viennent d'arriver en staging : on déclenche en arrière-plan
-            # la vérification de tous les emails sans statut, puis on déplace
-            # automatiquement vers `leads` ceux qui ressortent "disponible".
-            verify_job = SP.trigger_auto_verify_unverified_staging(db)
-            result["auto_verify_job_id"] = verify_job.get("job_id")
-            result["auto_verify_total"] = verify_job.get("total")
-        # --- Tri par tables finales (à réactiver plus tard) ---
-        # r6 = SP.StagingToComplete(db, base);  result.update(r6)
-        # r7 = SP.StagingToIncomplete(db, base); result.update(r7)
-        # r8 = SP.StagingToClean(db);        result.update(r8)
-        # r10 = SP.ClearBaseTable(db, base); result.update(r10)
-
-        if filename:
-            result["filename"] = filename
-            # "Déjà traité" UNIQUEMENT si TOUTES les lignes importées étaient des doublons
-            # (le déplacement vers applique/staging est un succès normal, PAS un "déjà traité").
-            total_deleted = int(result.get("total_deleted", 0) or 0)
-            handled_as_already_processed = total_deleted
-            if inserted_rows > 0 and handled_as_already_processed == inserted_rows and userid:
-                rollback_result = rollback_duplicate_upload_records(db, filename, userid, inserted_rows)
-                result.update(rollback_result)
-                result["duplicate_file_processed"] = True
-                result["message"] = "Tu as deja traite ce fichier"
-            else:
-                updatestat(db, result)
-            
-        return result
+        return SIJ.run_dispatch_pipeline(
+            db,
+            base,
+            filename=filename,
+            userid=userid,
+            inserted_rows=inserted_rows,
+            email_pattern=email_pattern,
+        )
 
     except Exception as e:
         import traceback

@@ -3,10 +3,12 @@ from api.api import Router as api_router
 from api.apiSociete import routes as societe_router
 from api.apiLeads import router as Leads_router
 from api.apiToken import Route as Token_router
+from api.apiImport import router as Import_router
 from model.staging_import_history import StagingImportHistory
 from model.steaging_applique import SteagingApplique
 from model.leads import Leads
 from model.export_leads import ExportLeads
+from model.import_job import ImportJob
 from fastapi.middleware.cors import CORSMiddleware
 from database.db import engine, Base
 from api.apiValidationRules import routes as validation_rules_router
@@ -200,6 +202,11 @@ with engine.begin() as conn:
     # (front pour l'affichage, sql_completion_expr côté SQL).
     conn.execute(text("ALTER TABLE optimized DROP COLUMN IF EXISTS completion"))
 
+    # Colonnes ajoutées historiquement à chaud, à chaque import : une DDL par
+    # import pour rien. Elles sont désormais garanties ici, au démarrage.
+    conn.execute(text("ALTER TABLE staging_import_history ADD COLUMN IF NOT EXISTS username TEXT"))
+    conn.execute(text("ALTER TABLE statistic_leads ADD COLUMN IF NOT EXISTS staging_vs_applique INTEGER"))
+
 from util.auth import require_auth
 # Sécurité : toutes les routes exigent un token Clerk valide (si REQUIRE_AUTH=true)
 _secured = [Depends(require_auth)]
@@ -207,6 +214,7 @@ app.include_router(api_router, dependencies=_secured)
 app.include_router(societe_router, dependencies=_secured)
 app.include_router(Leads_router, dependencies=_secured)
 app.include_router(validation_rules_router, dependencies=_secured)
+app.include_router(Import_router, dependencies=_secured)
 app.include_router(Token_router, dependencies=_secured)
 app.add_middleware(
     CORSMiddleware,

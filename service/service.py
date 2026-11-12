@@ -218,7 +218,8 @@ def LoadFileToBd(file: UploadFile, db: Session, userid: Optional[str] = None, us
 
         # Historiser chaque import pour garder la trace des leads importes
         # Ajout optionnel des infos utilisateur (utile pour export manager)
-        db.execute(text("ALTER TABLE staging_import_history ADD COLUMN IF NOT EXISTS username TEXT"))
+        # (la colonne `username` est garantie au démarrage dans main.py :
+        #  inutile de rejouer une DDL à chaque import)
         db.commit()
         history_df = df_clean.copy()
         history_df["filename"] = file.filename
@@ -384,7 +385,8 @@ def LoadRowsToBd(rows, db: Session, userid: Optional[str] = None, username: Opti
             chunksize=1000
         )
 
-        db.execute(text("ALTER TABLE staging_import_history ADD COLUMN IF NOT EXISTS username TEXT"))
+        # (la colonne `username` est garantie au démarrage dans main.py :
+        #  inutile de rejouer une DDL à chaque import)
         db.commit()
         history_df = df_clean.copy()
         history_df["filename"] = filename
@@ -916,7 +918,10 @@ def CleanSpecialChars(db: Session, base: str):
             FROM {base}
         """)).mappings().all()
 
-        cleaned = 0
+        # Les lignes à corriger sont regroupées puis envoyées par lots : un
+        # UPDATE par ligne faisait un aller-retour réseau par ligne, ce qui
+        # dominait le temps d'import sur les gros fichiers.
+        updates = []
         for r in rows:
             new = {
                 "nom": NetoyerUneChaine(r["nom"]),
@@ -934,13 +939,18 @@ def CleanSpecialChars(db: Session, base: str):
             )
             if not changed:
                 continue
-            db.execute(text(f"""
-                UPDATE {base}
-                SET nom=:nom, prenom=:prenom, fonction=:fonction, societe=:societe,
-                    location=:location, telephone=:telephone, email=:email
-                WHERE id=:id
-            """), {**new, "id": r["id"]})
-            cleaned += 1
+            updates.append({**new, "id": r["id"]})
+
+        stmt = text(f"""
+            UPDATE {base}
+            SET nom=:nom, prenom=:prenom, fonction=:fonction, societe=:societe,
+                location=:location, telephone=:telephone, email=:email
+            WHERE id=:id
+        """)
+        CHUNK = 1000
+        for start in range(0, len(updates), CHUNK):
+            db.execute(stmt, updates[start:start + CHUNK])
+        cleaned = len(updates)
 
         db.commit()
         print(f"✅ {cleaned} leads nettoyés (caractères spéciaux)")
@@ -955,11 +965,20 @@ def CleanSpecialChars(db: Session, base: str):
 
 
 def nettoyer_contact(db: Session):
+    """Nettoie les champs texte de import_leads.
+
+    Le chemin d'import mappé ne l'appelle plus : LoadRowsToBd nettoie déjà les
+    mêmes valeurs (pandas, avant insertion) et CleanSpecialChars repasse
+    ensuite dessus. Conservé pour /upload (import de fichier historique).
+
+    Une table vide n'est plus une erreur : le 404 faisait échouer tout un
+    import dont le lot avait été entièrement dédoublonné.
+    """
     try:
         result = db.query(StagingLeads).all()
 
         if not result:
-            raise HTTPException(status_code=404, detail="Aucun lead à nettoyer.")
+            return {"cleaned_rows": 0}
 
         for i in result:
             i.nom      = NetoyerUneChaine(i.nom)
@@ -1082,15 +1101,8 @@ def SaveStatic(db: Session,static:Static):
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Erreur inattendue : {str(e)}")
 def updatestat(db: Session, result: dict):
-    print("lena")
-
-    # Compat rétro: ajouter colonne si absente
-    try:
-        db.execute(text("ALTER TABLE statistic_leads ADD COLUMN IF NOT EXISTS staging_vs_applique INTEGER"))
-        db.commit()
-    except Exception:
-        db.rollback()
-
+    # La colonne staging_vs_applique est garantie au démarrage (main.py) :
+    # plus de DDL rejouée à chaque import.
     query = text("""
         UPDATE statistic_leads
         SET
@@ -1111,6 +1123,9 @@ def updatestat(db: Session, result: dict):
             blacklisted_removed = :blacklisted_removed
 
         WHERE filename = :filename
+          -- sans l'utilisateur, un même nom de fichier importé par deux
+          -- personnes écrasait les statistiques de l'autre
+          AND (:iduser = '' OR iduser = :iduser)
     """)
 
     db.execute(query, {
@@ -1130,7 +1145,8 @@ def updatestat(db: Session, result: dict):
 
         "blacklisted_removed": result.get("blacklisted_removed", 0),
 
-        "filename": result.get("filename")
+        "filename": result.get("filename"),
+        "iduser": str(result.get("iduser") or "")
     })
 
     db.commit()

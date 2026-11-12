@@ -16,3 +16,8 @@ env/
 
 # database
 *.sqlite3
+
+
+#fichier tar
+
+*.tar
